@@ -80,7 +80,7 @@ def verify_license():
     # --- [แก้ไข] ตรวจสอบและบันทึก Log หากมีการ Login ซ้ำ ก่อนสร้าง Session ใหม่ ---
     if license_info['session'] is not None:
         # หากมี session เก่าอยู่, หมายถึงมีการ login ซ้ำ
-        log_message = f"Duplicate Login Detected - License Key: {license_key}"
+        log_message = f"ตรวจพบการ Login ซ้ำซ้อน - License Key: {license_key}"
         login_logger.info(log_message)
         # แสดงใน console ของเซิร์ฟเวอร์ด้วยเพื่อความสะดวก
         print(f"[LOG] {log_message}")
