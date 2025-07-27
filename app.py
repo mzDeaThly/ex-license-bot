@@ -4,36 +4,12 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, date
 import uuid
-import logging
-import os
-
-# --- [เพิ่ม] ตั้งค่าการบันทึก Log สำหรับการ Login ซ้ำ ---
-LOG_DIR = 'logs'
-# สร้างโฟลเดอร์ logs หากยังไม่มี
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
-# 1. สร้าง Logger สำหรับบันทึกการ login ซ้ำโดยเฉพาะ
-login_logger = logging.getLogger('duplicate_logins')
-login_logger.setLevel(logging.INFO)
-
-# 2. สร้าง File Handler เพื่อกำหนดไฟล์ที่จะบันทึก Log
-# โดยจะบันทึกไปที่ไฟล์ logs/duplicate_logins.log
-file_handler = logging.FileHandler(os.path.join(LOG_DIR, 'duplicate_logins.log'))
-
-# 3. สร้าง Formatter เพื่อกำหนดรูปแบบของ Log ที่จะบันทึก
-# รูปแบบ: YYYY-MM-DD HH:MM:SS - ข้อความ Log
-formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-file_handler.setFormatter(formatter)
-
-# 4. เพิ่ม Handler เข้าไปใน Logger (ถ้ายังไม่มี handler เพื่อป้องกันการเพิ่มซ้ำ)
-if not login_logger.handlers:
-    login_logger.addHandler(file_handler)
-# --- จบส่วนตั้งค่า Log ---
-
+# [ลบ] ไม่จำเป็นต้องใช้ import logging และ os อีกต่อไป
 
 app = Flask(__name__)
 CORS(app)
+
+# [ลบ] นำโค้ดส่วนที่ตั้งค่า Logger และสร้างโฟลเดอร์ logs ออกทั้งหมด
 
 VALID_LICENSES = {
     'EX-DEAR': {
@@ -77,15 +53,13 @@ def verify_license():
         print("ผลลัพธ์: Format วันที่ในฐานข้อมูลไม่ถูกต้อง")
         return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์'}), 500
         
-    # --- [แก้ไข] ตรวจสอบและบันทึก Log หากมีการ Login ซ้ำ ก่อนสร้าง Session ใหม่ ---
+    # --- [แก้ไข] ตรวจสอบและ Print Log หากมีการ Login ซ้ำ ---
     if license_info['session'] is not None:
-        # หากมี session เก่าอยู่, หมายถึงมีการ login ซ้ำ
-        log_message = f"ตรวจพบการ Login ซ้ำซ้อน - License Key: {license_key}"
-        login_logger.info(log_message)
-        # แสดงใน console ของเซิร์ฟเวอร์ด้วยเพื่อความสะดวก
-        print(f"[LOG] {log_message}")
+        # พิมพ์ Log ออกมาที่ Console โดยตรง
+        # Render จะดักจับข้อความนี้ไปแสดงในหน้า Logs ของคุณ
+        print(f"[DUPLICATE_LOGIN] Detected for License Key: {license_key}")
     
-    # สร้าง/เขียนทับ Session ใหม่ (โค้ดส่วนนี้ทำงานเหมือนเดิม)
+    # สร้าง/เขียนทับ Session ใหม่
     session_token = str(uuid.uuid4())
     license_info['session'] = {
         'token': session_token,
