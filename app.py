@@ -8,25 +8,29 @@ import uuid
 app = Flask(__name__)
 CORS(app)
 
-# ฐานข้อมูล License Key (ในระบบจริงควรใช้ Database)
+# --- [การเปลี่ยนแปลงที่ 1] โครงสร้างข้อมูลใหม่ ---
+# เพิ่ม key 'session' เข้าไปในแต่ละ license เพื่อเก็บข้อมูล session ของตัวเองโดยตรง
+# ค่าเริ่มต้นเป็น None คือยังไม่มี session
 VALID_LICENSES = {
     'EX-DEAR': {
         'expires_on': '2025-12-31',
-        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1' 
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
+        'session': None 
     },
     'EX-DEV-888': {
-        'expires_on': '2025-12-31',
-        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1' 
+        'expires_on': '2024-07-31',
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
+        'session': None
     },
     'EX-TEST': {
-        'expires_on': '2025-07-31',
-        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1'
+        'expires_on': '2024-01-01',
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
+        'session': None
     }
 }
 
-# ฐานข้อมูลสำหรับเก็บ Session ที่กำลังใช้งาน (ในระบบจริงควรใช้ Redis)
-ACTIVE_SESSIONS = {}
-SESSION_TIMEOUT_MINUTES = 10 
+# ไม่จำเป็นต้องใช้ ACTIVE_SESSIONS แบบ global อีกต่อไป
+# SESSION_TIMEOUT_MINUTES = 10 # หากต้องการใช้การ timeout สามารถนำกลับมาได้
 
 @app.route('/verify-license', methods=['POST'])
 def verify_license():
@@ -41,6 +45,7 @@ def verify_license():
         print("ผลลัพธ์: Key ไม่ถูกต้อง")
         return jsonify({'isValid': False, 'message': 'License Key ไม่ถูกต้อง'}), 401
 
+    # ดึงข้อมูล license ทั้ง object
     license_info = VALID_LICENSES[license_key]
     
     try:
@@ -52,14 +57,14 @@ def verify_license():
         print("ผลลัพธ์: Format วันที่ในฐานข้อมูลไม่ถูกต้อง")
         return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์'}), 500
         
-    # อนุญาตให้การ Login ใหม่เขียนทับข้อมูล Session เก่าได้เลย (Last-one-wins)
+    # --- [การเปลี่ยนแปลงที่ 2] สร้าง/เขียนทับ Session ลงใน license_info โดยตรง ---
     session_token = str(uuid.uuid4())
-    ACTIVE_SESSIONS[license_key] = {
-        'session_token': session_token,
+    license_info['session'] = {
+        'token': session_token,
         'last_seen': datetime.utcnow()
     }
     
-    print(f"ผลลัพธ์: Key ถูกต้อง, สร้าง/อัปเดต Session Token สำเร็จ")
+    print(f"ผลลัพธ์: Key ถูกต้อง, สร้าง/อัปเดต Session Token สำหรับ {license_key} สำเร็จ")
     return jsonify({
         'isValid': True,
         'message': 'License Key ถูกต้องและเปิดใช้งานแล้ว',
@@ -77,15 +82,18 @@ def heartbeat():
     license_key = data.get('licenseKey')
     session_token = data.get('sessionToken')
 
-    if license_key in ACTIVE_SESSIONS and ACTIVE_SESSIONS[license_key]['session_token'] == session_token:
-        ACTIVE_SESSIONS[license_key]['last_seen'] = datetime.utcnow()
-        print(f"[Heartbeat] ได้รับสัญญาณจาก Key: {license_key}")
-        return jsonify({'status': 'ok'}), 200
-    else:
-        # ถ้า Token ไม่ตรงกัน (เพราะมีเครื่องอื่นมา Login ทับ) จะคืนค่า 403
-        print(f"[Heartbeat] Token ไม่ถูกต้องสำหรับ Key: {license_key}. อาจถูกเครื่องอื่น Login ทับ")
-        return jsonify({'status': 'invalid_session'}), 403
+    # --- [การเปลี่ยนแปลงที่ 3] ตรวจสอบ Session จากใน license_info โดยตรง ---
+    if license_key in VALID_LICENSES:
+        license_info = VALID_LICENSES[license_key]
+        # ตรวจสอบว่ามี session อยู่ และ token ตรงกันหรือไม่
+        if license_info['session'] and license_info['session']['token'] == session_token:
+            license_info['session']['last_seen'] = datetime.utcnow()
+            print(f"[Heartbeat] ได้รับสัญญาณจาก Key: {license_key}")
+            return jsonify({'status': 'ok'}), 200
+
+    # ถ้าเงื่อนไขข้างบนไม่ผ่าน (key ไม่มี, ไม่มี session, หรือ token ไม่ตรง)
+    print(f"[Heartbeat] Token ไม่ถูกต้องสำหรับ Key: {license_key}. อาจถูกเครื่องอื่น Login ทับ")
+    return jsonify({'status': 'invalid_session'}), 403
 
 if __name__ == '__main__':
-    # ในการใช้งานจริง ควรใช้ Production Server เช่น Gunicorn หรือ uWSGI
     app.run(host='0.0.0.0', port=5000)
