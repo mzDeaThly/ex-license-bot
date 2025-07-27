@@ -15,12 +15,12 @@ VALID_LICENSES = {
     'EX-DEV-888': {
         'expires_on': '2025-12-31',
         'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-        'session': None
+        'session': None 
     },
     'EX-TEST': {
-        'expires_on': '2024-07-31',
+        'expires_on': '2025-07-31',
         'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-        'session': None
+        'session': None 
     }
 }
 
