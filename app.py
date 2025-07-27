@@ -1,24 +1,27 @@
 import os
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from datetime import datetime, date, timedelta
-import uuid
-from flask_sqlalchemy import SQLAlchemy
-from flask_admin import Admin
-from flask_admin.contrib.sqla import ModelView
 import json
+import uuid
+from datetime import datetime, date, timedelta
+from functools import wraps
+
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from flask_admin import Admin, AdminIndexView
+from flask_admin.contrib.sqla import ModelView
 
 # --- 1. ตั้งค่าพื้นฐานและฐานข้อมูล ---
 app = Flask(__name__)
 CORS(app)
 
+# กำหนดค่าตำแหน่งที่เก็บไฟล์ฐานข้อมูลสำหรับ Render Persistent Disk
 DISK_STORAGE_PATH = '/var/data'
 DATABASE_FILE = 'licenses.db'
 DATABASE_PATH = os.path.join(DISK_STORAGE_PATH, DATABASE_FILE)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + DATABASE_PATH
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'exadmin' 
+app.config['SECRET_KEY'] = 'exadmin' # เปลี่ยนเป็นคีย์ลับของคุณ
 
 db = SQLAlchemy(app)
 
@@ -35,21 +38,49 @@ class License(db.Model):
     def __repr__(self):
         return f'<License {self.key}>'
 
-# --- 3. สร้างแผงควบคุมสำหรับ Admin ---
-admin = Admin(app, name='License Manager', template_mode='bootstrap4')
-admin.add_view(ModelView(License, db.session))
+# --- 3. ส่วนของโค้ดสำหรับป้องกัน Admin Panel ---
+def check_auth(username, password):
+    """ตรวจสอบ Username และ Password กับค่าที่ตั้งไว้ใน Environment Variables"""
+    admin_user = os.environ.get('ADMIN_USERNAME')
+    admin_pass = os.environ.get('ADMIN_PASSWORD')
+    return username == admin_user and password == admin_pass
 
-# --- [แก้ไข] ย้าย db.create_all() มาไว้ตรงนี้ ---
-# สร้างไฟล์ฐานข้อมูลและ Table ทั้งหมดในครั้งแรกที่รัน
-# และจะข้ามไปหาก Table มีอยู่แล้ว
+def authenticate():
+    """ส่ง Response 401 Unauthorized เพื่อให้เบราว์เซอร์แสดงหน้าต่าง Login"""
+    return Response(
+    'Could not verify your access level for that URL.\n'
+    'You have to login with proper credentials', 401,
+    {'WWW-Authenticate': 'Basic realm="Login Required"'})
+
+class ProtectedAdminIndexView(AdminIndexView):
+    def is_accessible(self):
+        auth = request.authorization
+        return auth and check_auth(auth.username, auth.password)
+
+    def inaccessible_callback(self, name, **kwargs):
+        return authenticate()
+
+class ProtectedModelView(ModelView):
+    def is_accessible(self):
+        auth = request.authorization
+        return auth and check_auth(auth.username, auth.password)
+
+    def inaccessible_callback(self, name, **kwargs):
+        return authenticate()
+
+# --- 4. สร้างแผงควบคุมสำหรับ Admin โดยใช้ View ที่ป้องกันแล้ว ---
+admin = Admin(app, name='License Manager', template_mode='bootstrap4', index_view=ProtectedAdminIndexView())
+admin.add_view(ProtectedModelView(License, db.session))
+
+# --- สร้าง Table ในฐานข้อมูล (จะทำงานเมื่อแอปเริ่ม) ---
 with app.app_context():
     db.create_all()
 
-# --- 4. ปรับแก้ API Endpoints ให้ทำงานกับฐานข้อมูล (โค้ดเดิม) ---
+# --- 5. API Endpoints ---
 SESSION_TIMEOUT_MINUTES = 10
 
 def get_active_sessions(license_obj):
-    # ... โค้ดเดิม ...
+    """ดึงและทำความสะอาด active sessions ที่หมดอายุแล้ว"""
     sessions = json.loads(license_obj.active_sessions)
     fresh_sessions = []
     now = datetime.utcnow()
@@ -63,7 +94,6 @@ def get_active_sessions(license_obj):
 
 @app.route('/verify-license', methods=['POST'])
 def verify_license():
-    # ... โค้ดเดิม ...
     data = request.get_json()
     license_key = data.get('licenseKey')
 
@@ -103,10 +133,8 @@ def verify_license():
         'sessionToken': new_token
     })
 
-
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
-    # ... โค้ดเดิม ...
     data = request.get_json()
     license_key = data.get('licenseKey')
     session_token = data.get('sessionToken')
@@ -134,7 +162,6 @@ def heartbeat():
     else:
         return jsonify({'status': 'invalid_session'}), 403
 
-
-# [ลบ] นำ db.create_all() ออกจากส่วนนี้
+# --- 6. ส่วนสำหรับรันแอปพลิเคชัน ---
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
