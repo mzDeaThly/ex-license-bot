@@ -12,14 +12,13 @@ import json
 app = Flask(__name__)
 CORS(app)
 
-# [แก้ไข] เปลี่ยนตำแหน่งที่เก็บไฟล์ฐานข้อมูลไปยัง Persistent Disk ที่เราสร้างไว้
 DISK_STORAGE_PATH = '/var/data'
 DATABASE_FILE = 'licenses.db'
 DATABASE_PATH = os.path.join(DISK_STORAGE_PATH, DATABASE_FILE)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + DATABASE_PATH
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'exadmin' # ควรเปลี่ยนเป็นคีย์ลับของคุณเอง
+app.config['SECRET_KEY'] = 'your-very-secret-key-for-admin' 
 
 db = SQLAlchemy(app)
 
@@ -40,10 +39,17 @@ class License(db.Model):
 admin = Admin(app, name='License Manager', template_mode='bootstrap4')
 admin.add_view(ModelView(License, db.session))
 
-# --- 4. ปรับแก้ API Endpoints ให้ทำงานกับฐานข้อมูล ---
+# --- [แก้ไข] ย้าย db.create_all() มาไว้ตรงนี้ ---
+# สร้างไฟล์ฐานข้อมูลและ Table ทั้งหมดในครั้งแรกที่รัน
+# และจะข้ามไปหาก Table มีอยู่แล้ว
+with app.app_context():
+    db.create_all()
+
+# --- 4. ปรับแก้ API Endpoints ให้ทำงานกับฐานข้อมูล (โค้ดเดิม) ---
 SESSION_TIMEOUT_MINUTES = 10
 
 def get_active_sessions(license_obj):
+    # ... โค้ดเดิม ...
     sessions = json.loads(license_obj.active_sessions)
     fresh_sessions = []
     now = datetime.utcnow()
@@ -57,6 +63,7 @@ def get_active_sessions(license_obj):
 
 @app.route('/verify-license', methods=['POST'])
 def verify_license():
+    # ... โค้ดเดิม ...
     data = request.get_json()
     license_key = data.get('licenseKey')
 
@@ -96,8 +103,10 @@ def verify_license():
         'sessionToken': new_token
     })
 
+
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
+    # ... โค้ดเดิม ...
     data = request.get_json()
     license_key = data.get('licenseKey')
     session_token = data.get('sessionToken')
@@ -125,7 +134,7 @@ def heartbeat():
     else:
         return jsonify({'status': 'invalid_session'}), 403
 
+
+# [ลบ] นำ db.create_all() ออกจากส่วนนี้
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(host='0.0.0.0', port=5000)
