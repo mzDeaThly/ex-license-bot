@@ -2,35 +2,56 @@
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 import uuid
+import logging
+import os
+
+# --- [เพิ่ม] ตั้งค่าการบันทึก Log สำหรับการ Login ซ้ำ ---
+LOG_DIR = 'logs'
+# สร้างโฟลเดอร์ logs หากยังไม่มี
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+# 1. สร้าง Logger สำหรับบันทึกการ login ซ้ำโดยเฉพาะ
+login_logger = logging.getLogger('duplicate_logins')
+login_logger.setLevel(logging.INFO)
+
+# 2. สร้าง File Handler เพื่อกำหนดไฟล์ที่จะบันทึก Log
+# โดยจะบันทึกไปที่ไฟล์ logs/duplicate_logins.log
+file_handler = logging.FileHandler(os.path.join(LOG_DIR, 'duplicate_logins.log'))
+
+# 3. สร้าง Formatter เพื่อกำหนดรูปแบบของ Log ที่จะบันทึก
+# รูปแบบ: YYYY-MM-DD HH:MM:SS - ข้อความ Log
+formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+file_handler.setFormatter(formatter)
+
+# 4. เพิ่ม Handler เข้าไปใน Logger (ถ้ายังไม่มี handler เพื่อป้องกันการเพิ่มซ้ำ)
+if not login_logger.handlers:
+    login_logger.addHandler(file_handler)
+# --- จบส่วนตั้งค่า Log ---
+
 
 app = Flask(__name__)
 CORS(app)
 
-# --- [การเปลี่ยนแปลงที่ 1] โครงสร้างข้อมูลใหม่ ---
-# เพิ่ม key 'session' เข้าไปในแต่ละ license เพื่อเก็บข้อมูล session ของตัวเองโดยตรง
-# ค่าเริ่มต้นเป็น None คือยังไม่มี session
 VALID_LICENSES = {
-    'EX-DEAR': {
-        'expires_on': '2025-12-31',
-        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-        'session': None 
-    },
-    'EX-DEV-888': {
-        'expires_on': '2025-12-31',
-        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-        'session': None
-    },
-    'EX-TEST': {
-        'expires_on': '2024-01-01',
-        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-        'session': None
-    }
+    'EX-DEAR': {
+        'expires_on': '2030-12-31',
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
+        'session': None 
+    },
+    'EX-DEV-888': {
+        'expires_on': '2025-12-31',
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
+        'session': None
+    },
+    'EX-TEST': {
+        'expires_on': '2024-07-31',
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
+        'session': None
+    }
 }
-
-# ไม่จำเป็นต้องใช้ ACTIVE_SESSIONS แบบ global อีกต่อไป
-# SESSION_TIMEOUT_MINUTES = 10 # หากต้องการใช้การ timeout สามารถนำกลับมาได้
 
 @app.route('/verify-license', methods=['POST'])
 def verify_license():
@@ -45,7 +66,6 @@ def verify_license():
         print("ผลลัพธ์: Key ไม่ถูกต้อง")
         return jsonify({'isValid': False, 'message': 'License Key ไม่ถูกต้อง'}), 401
 
-    # ดึงข้อมูล license ทั้ง object
     license_info = VALID_LICENSES[license_key]
     
     try:
@@ -57,7 +77,15 @@ def verify_license():
         print("ผลลัพธ์: Format วันที่ในฐานข้อมูลไม่ถูกต้อง")
         return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์'}), 500
         
-    # --- [การเปลี่ยนแปลงที่ 2] สร้าง/เขียนทับ Session ลงใน license_info โดยตรง ---
+    # --- [แก้ไข] ตรวจสอบและบันทึก Log หากมีการ Login ซ้ำ ก่อนสร้าง Session ใหม่ ---
+    if license_info['session'] is not None:
+        # หากมี session เก่าอยู่, หมายถึงมีการ login ซ้ำ
+        log_message = f"Duplicate Login Detected - License Key: {license_key}"
+        login_logger.info(log_message)
+        # แสดงใน console ของเซิร์ฟเวอร์ด้วยเพื่อความสะดวก
+        print(f"[LOG] {log_message}")
+    
+    # สร้าง/เขียนทับ Session ใหม่ (โค้ดส่วนนี้ทำงานเหมือนเดิม)
     session_token = str(uuid.uuid4())
     license_info['session'] = {
         'token': session_token,
@@ -82,16 +110,12 @@ def heartbeat():
     license_key = data.get('licenseKey')
     session_token = data.get('sessionToken')
 
-    # --- [การเปลี่ยนแปลงที่ 3] ตรวจสอบ Session จากใน license_info โดยตรง ---
     if license_key in VALID_LICENSES:
         license_info = VALID_LICENSES[license_key]
-        # ตรวจสอบว่ามี session อยู่ และ token ตรงกันหรือไม่
         if license_info['session'] and license_info['session']['token'] == session_token:
             license_info['session']['last_seen'] = datetime.utcnow()
-            print(f"[Heartbeat] ได้รับสัญญาณจาก Key: {license_key}")
             return jsonify({'status': 'ok'}), 200
 
-    # ถ้าเงื่อนไขข้างบนไม่ผ่าน (key ไม่มี, ไม่มี session, หรือ token ไม่ตรง)
     print(f"[Heartbeat] Token ไม่ถูกต้องสำหรับ Key: {license_key}. อาจถูกเครื่องอื่น Login ทับ")
     return jsonify({'status': 'invalid_session'}), 403
 
