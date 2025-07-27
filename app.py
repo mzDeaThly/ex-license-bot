@@ -18,7 +18,7 @@ DATABASE_PATH = os.path.join(DISK_STORAGE_PATH, DATABASE_FILE)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + DATABASE_PATH
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'your-very-secret-key-for-admin' 
+app.config['SECRET_KEY'] = 'exadmin' 
 
 db = SQLAlchemy(app)
 
