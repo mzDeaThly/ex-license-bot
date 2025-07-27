@@ -1,92 +1,131 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import uuid
+from flask_sqlalchemy import SQLAlchemy
+from flask_admin import Admin
+from flask_admin.contrib.sqla import ModelView
+import json
 
+# --- 1. ตั้งค่าพื้นฐานและฐานข้อมูล ---
 app = Flask(__name__)
 CORS(app)
 
-VALID_LICENSES = {
-    'EX-DEAR': {
-    'expires_on': '2030-12-31',
-    'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-    'session': None
-},
-    'EX-DEV-888': {
-    'expires_on': '2025-12-31',
-    'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-    'session': None
-},
-    'EX-TEST': {
-    'expires_on': '2025-07-31',
-    'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1',
-    'session': None
-}
-}
+# [แก้ไข] เปลี่ยนตำแหน่งที่เก็บไฟล์ฐานข้อมูลไปยัง Persistent Disk ที่เราสร้างไว้
+DISK_STORAGE_PATH = '/var/data'
+DATABASE_FILE = 'licenses.db'
+DATABASE_PATH = os.path.join(DISK_STORAGE_PATH, DATABASE_FILE)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + DATABASE_PATH
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'exadmin' # ควรเปลี่ยนเป็นคีย์ลับของคุณเอง
+
+db = SQLAlchemy(app)
+
+# --- 2. สร้าง Model สำหรับฐานข้อมูล ---
+class License(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(80), unique=True, nullable=False)
+    expires_on = db.Column(db.Date, nullable=False)
+    api_key = db.Column(db.String(120), nullable=False)
+    tier = db.Column(db.String(50), default='Basic')
+    max_sessions = db.Column(db.Integer, default=1)
+    active_sessions = db.Column(db.Text, default='[]')
+
+    def __repr__(self):
+        return f'<License {self.key}>'
+
+# --- 3. สร้างแผงควบคุมสำหรับ Admin ---
+admin = Admin(app, name='License Manager', template_mode='bootstrap4')
+admin.add_view(ModelView(License, db.session))
+
+# --- 4. ปรับแก้ API Endpoints ให้ทำงานกับฐานข้อมูล ---
+SESSION_TIMEOUT_MINUTES = 10
+
+def get_active_sessions(license_obj):
+    sessions = json.loads(license_obj.active_sessions)
+    fresh_sessions = []
+    now = datetime.utcnow()
+    
+    for session in sessions:
+        last_seen = datetime.fromisoformat(session['last_seen'])
+        if now - last_seen < timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+            fresh_sessions.append(session)
+            
+    return fresh_sessions
 
 @app.route('/verify-license', methods=['POST'])
 def verify_license():
     data = request.get_json()
-    if not data or 'licenseKey' not in data:
+    license_key = data.get('licenseKey')
+
+    if not license_key:
         return jsonify({'isValid': False, 'message': 'กรุณาส่ง License Key'}), 400
 
-    license_key = data.get('licenseKey')
-    print(f"ได้รับคำขอตรวจสอบ Key: {license_key}")
+    license_obj = License.query.filter_by(key=license_key).first()
 
-    if license_key not in VALID_LICENSES:
-        print("ผลลัพธ์: Key ไม่ถูกต้อง")
+    if not license_obj:
         return jsonify({'isValid': False, 'message': 'License Key ไม่ถูกต้อง'}), 401
 
-    license_info = VALID_LICENSES[license_key]
+    if license_obj.expires_on < date.today():
+        return jsonify({'isValid': False, 'message': f'License Key หมดอายุแล้วเมื่อวันที่ {license_obj.expires_on}'}), 403
+
+    active_sessions = get_active_sessions(license_obj)
     
-    try:
-        expiration_date = datetime.strptime(license_info['expires_on'], '%Y-%m-%d').date()
-        if expiration_date < date.today():
-            print(f"ผลลัพธ์: Key หมดอายุแล้ว")
-            return jsonify({'isValid': False, 'message': f'License Key หมดอายุแล้วเมื่อวันที่ {license_info["expires_on"]}'}), 403
-    except ValueError:
-        print("ผลลัพธ์: Format วันที่ในฐานข้อมูลไม่ถูกต้อง")
-        return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์'}), 500
-        
-    # --- [แก้ไข] ตรวจสอบและ Print Log หากมีการ Login ซ้ำ ---
-    if license_info['session'] is not None:
-        # พิมพ์ Log ออกมาที่ Console โดยตรง
-        # Render จะดักจับข้อความนี้ไปแสดงในหน้า Logs ของคุณ
-        print(f"[DUPLICATE_LOGIN] Detected for License Key: {license_key}")
-    
-    # สร้าง/เขียนทับ Session ใหม่
-    session_token = str(uuid.uuid4())
-    license_info['session'] = {
-        'token': session_token,
-        'last_seen': datetime.utcnow()
+    if len(active_sessions) >= license_obj.max_sessions:
+        print(f"[SESSION_FULL] Key: {license_key} ใช้งานครบจำนวนเครื่องแล้ว ({len(active_sessions)}/{license_obj.max_sessions})")
+        return jsonify({'isValid': False, 'message': 'License Key นี้ถูกใช้งานครบจำนวนเครื่องแล้ว'}), 429
+
+    new_token = str(uuid.uuid4())
+    new_session = {
+        "token": new_token,
+        "last_seen": datetime.utcnow().isoformat()
     }
+    active_sessions.append(new_session)
     
-    print(f"ผลลัพธ์: Key ถูกต้อง, สร้าง/อัปเดต Session Token สำหรับ {license_key} สำเร็จ")
+    license_obj.active_sessions = json.dumps(active_sessions)
+    db.session.commit()
+    
+    print(f"[LOGIN_SUCCESS] สร้าง Session ใหม่สำหรับ Key: {license_key}")
     return jsonify({
         'isValid': True,
         'message': 'License Key ถูกต้องและเปิดใช้งานแล้ว',
-        'expiresOn': license_info['expires_on'],
-        'apiKey': license_info['api_key'],
-        'sessionToken': session_token
+        'expiresOn': license_obj.expires_on.strftime('%Y-%m-%d'),
+        'apiKey': license_obj.api_key,
+        'sessionToken': new_token
     })
 
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
     data = request.get_json()
-    if not data or 'licenseKey' not in data or 'sessionToken' not in data:
-        return jsonify({'status': 'invalid_request'}), 400
-        
     license_key = data.get('licenseKey')
     session_token = data.get('sessionToken')
 
-    if license_key in VALID_LICENSES:
-        license_info = VALID_LICENSES[license_key]
-        if license_info['session'] and license_info['session']['token'] == session_token:
-            license_info['session']['last_seen'] = datetime.utcnow()
-            return jsonify({'status': 'ok'}), 200
+    if not license_key or not session_token:
+        return jsonify({'status': 'invalid_request'}), 400
 
-    print(f"[Heartbeat] Token ไม่ถูกต้องสำหรับ Key: {license_key}. อาจถูกเครื่องอื่น Login ทับ")
-    return jsonify({'status': 'invalid_session'}), 403
+    license_obj = License.query.filter_by(key=license_key).first()
+    if not license_obj:
+        return jsonify({'status': 'invalid_session'}), 403
+
+    active_sessions = json.loads(license_obj.active_sessions)
+    session_found = False
+    
+    for session in active_sessions:
+        if session['token'] == session_token:
+            session['last_seen'] = datetime.utcnow().isoformat()
+            session_found = True
+            break
+            
+    if session_found:
+        license_obj.active_sessions = json.dumps(active_sessions)
+        db.session.commit()
+        return jsonify({'status': 'ok'}), 200
+    else:
+        return jsonify({'status': 'invalid_session'}), 403
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(host='0.0.0.0', port=5000)
