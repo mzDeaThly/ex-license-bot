@@ -10,6 +10,10 @@ CORS(app)
 
 # ฐานข้อมูล License Key (ในระบบจริงควรใช้ Database)
 VALID_LICENSES = {
+    'EX-DEAR': {
+        'expires_on': '2025-12-31',
+        'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1' 
+    },
     'EX-DEV-888': {
         'expires_on': '2025-12-31',
         'api_key': 'CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1' 
