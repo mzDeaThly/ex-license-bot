@@ -1,15 +1,10 @@
-# app.py
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, date
 import uuid
-# [ลบ] ไม่จำเป็นต้องใช้ import logging และ os อีกต่อไป
 
 app = Flask(__name__)
 CORS(app)
-
-# [ลบ] นำโค้ดส่วนที่ตั้งค่า Logger และสร้างโฟลเดอร์ logs ออกทั้งหมด
 
 VALID_LICENSES = {
     'EX-DEAR': {
