@@ -3,24 +3,23 @@ import json
 import uuid
 from datetime import datetime, date, timedelta
 
-from flask import Flask, request, jsonify, Response, redirect
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
 import omise
 
-# --- 1. ตั้งค่าพื้นฐาน ---
+# --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app)
 
-# --- ตั้งค่า Omise API Key จาก Environment Variables ---
+# --- Omise API Key Setup from Environment Variables ---
 omise.api_version = '2019-05-29'
-# omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
-omise.secret_key = 'skey_test_64izw1rl4pobkqpl4kr' # ใส่ Key ของคุณตรงนี้
+omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
 YOUR_DOMAIN = os.environ.get('YOUR_DOMAIN') 
 
-# --- ตั้งค่าฐานข้อมูลสำหรับ Render Persistent Disk ---
+# --- Database Setup for Render Persistent Disk ---
 DISK_STORAGE_PATH = '/var/data'
 DATABASE_FILE = 'licenses.db'
 DATABASE_PATH = os.path.join(DISK_STORAGE_PATH, DATABASE_FILE)
@@ -31,7 +30,7 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default-secret-key-for-
 
 db = SQLAlchemy(app)
 
-# --- 2. สร้าง Model สำหรับฐานข้อมูล ---
+# --- 2. Database Model ---
 class License(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     key = db.Column(db.String(80), unique=True, nullable=False)
@@ -44,7 +43,7 @@ class License(db.Model):
     def __repr__(self):
         return f'<License {self.key}>'
 
-# --- 3. ส่วนของโค้ดสำหรับป้องกัน Admin Panel ---
+# --- 3. Admin Panel Protection ---
 def check_auth(username, password):
     admin_user = os.environ.get('ADMIN_USERNAME')
     admin_pass = os.environ.get('ADMIN_PASSWORD')
@@ -70,44 +69,43 @@ class ProtectedModelView(ModelView):
     def inaccessible_callback(self, name, **kwargs):
         return authenticate()
 
-# --- 4. สร้างแผงควบคุมสำหรับ Admin ---
+# --- 4. Admin Panel Creation ---
 admin = Admin(app, name='License Manager', template_mode='bootstrap4', index_view=ProtectedAdminIndexView())
 admin.add_view(ProtectedModelView(License, db.session))
 
-# --- สร้าง Table ในฐานข้อมูล ---
+# --- Create Database Tables (Runs when the app starts) ---
 with app.app_context():
     db.create_all()
 
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
     'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1},
-    'basic3': {'price_satang': 180000, 'duration_days': 90, 'max_sessions': 3},
+    'basic3': {'price_satang': 180000, 'duration_days': 30, 'max_sessions': 3},
     'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1},
-    'pro3': {'price_satang': 450000, 'duration_days': 90, 'max_sessions': 3}
+    'pro3': {'price_satang': 450000, 'duration_days': 30, 'max_sessions': 3}
 }
+SESSION_TIMEOUT_MINUTES = 10
+
+@app.route('/')
+def index():
+    return app.send_static_file('index.html')
 
 @app.route('/create-charge-with-tier', methods=['POST'])
 def create_charge_with_tier():
     try:
-        print("[DEBUG] เข้าสู่ฟังก์ชัน /create-charge-with-tier")
         data = request.get_json()
         email = data.get('email')
         user_key = data.get('licenseKey')
         tier = data.get('tier')
-        print(f"[DEBUG] ได้รับข้อมูล: email={email}, key={user_key}, tier={tier}")
 
         if not all([email, user_key, tier]) or tier not in TIER_CONFIG:
-            print("[ERROR] ข้อมูลไม่ครบถ้วนหรือไม่ถูกต้อง")
             return jsonify({'message': 'Missing or invalid information'}), 400
 
-        print("[DEBUG] กำลังตรวจสอบ License Key ที่มีอยู่...")
         if License.query.filter_by(key=user_key).first():
-            print(f"[ERROR] License Key '{user_key}' ถูกใช้งานแล้ว")
             return jsonify({'message': 'This License Key is already in use.'}), 409
 
         tier_info = TIER_CONFIG[tier]
         amount = tier_info['price_satang']
-        print(f"[DEBUG] Tier: {tier}, จำนวนเงิน: {amount}. กำลังเตรียมสร้าง Charge ของ Omise")
 
         charge = omise.Charge.create(
             amount=amount,
@@ -115,8 +113,6 @@ def create_charge_with_tier():
             source={'type': 'promptpay'},
             metadata={'email': email, 'requested_key': user_key, 'tier': tier}
         )
-        print(f"[DEBUG] สร้าง Charge ของ Omise สำเร็จ. Charge ID: {charge.id}")
-        
         new_license = License(
             key=f"PENDING-{user_key}",
             expires_on=date.today(),
@@ -125,24 +121,16 @@ def create_charge_with_tier():
             max_sessions=0
         )
         db.session.add(new_license)
-        print("[DEBUG] เพิ่ม License ที่รอการชำระเงินเข้าสู่ session")
         db.session.commit()
-        print("[DEBUG] บันทึก License ที่รอการชำระเงินลงฐานข้อมูลสำเร็จ")
         
         return jsonify({
             'chargeId': charge.id,
             'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
         })
-
     except Exception as e:
-        # โค้ดส่วนนี้จะดักจับ Error ทุกชนิด แล้วพิมพ์ออกมาใน Log
-        print("!!!!!!!!!!!!!!!!! เกิดข้อผิดพลาดร้ายแรง !!!!!!!!!!!!!!!!!")
-        print(f"[FATAL_ERROR] ประเภทของ Exception: {type(e)}")
-        print(f"[FATAL_ERROR] รายละเอียด Exception: {e}")
         import traceback
-        traceback.print_exc() # คำสั่งนี้จะพิมพ์ Traceback ทั้งหมดออกมาใน Log
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        return jsonify({'message': 'An internal server error occurred.'}), 500
+        traceback.print_exc()
+        return jsonify({'message': str(e)}), 500
 
 @app.route('/check-charge-status')
 def check_charge_status():
@@ -159,18 +147,7 @@ def check_charge_status():
 
 @app.route('/omise-webhook', methods=['POST'])
 def omise_webhook():
-    event = None
-    payload = request.data
-    sig_header = request.headers['STRIPE_SIGNATURE'] # Corrected from Stripe to Omise later if needed, but Omise uses a similar concept
-    endpoint_secret = os.environ.get('OMISE_WEBHOOK_SECRET')
-
-    try:
-        # Note: Omise webhook verification is simpler than Stripe's.
-        # This is a simplified check. For production, refer to Omise's library for verification.
-        event = json.loads(payload)
-    except Exception as e:
-        return jsonify({'error': 'Invalid payload'}), 400
-
+    event = request.get_json()
     if event.get('key') == 'charge.complete':
         charge_data = event['data']
         if charge_data.get('status') == 'successful':
@@ -196,7 +173,7 @@ def omise_webhook():
                 print(f"✅ Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
 
     return jsonify({'status': 'ok'})
-
+    
 # ... (verify-license and heartbeat endpoints) ...
 
 if __name__ == '__main__':
