@@ -169,7 +169,7 @@ def omise_webhook():
                 tier_info = TIER_CONFIG[tier]
                 license_to_update.key = requested_key
                 license_to_update.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-                license_to_update.api_key = "YOUR_DEFAULT_CAPSOLVER_API_KEY"
+                license_to_update.api_key = "CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1"
                 license_to_update.tier = tier
                 license_to_update.max_sessions = tier_info['max_sessions']
                 
