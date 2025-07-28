@@ -10,6 +10,9 @@ from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
 import omise
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app)
