@@ -87,27 +87,35 @@ TIER_CONFIG = {
 
 @app.route('/create-charge-with-tier', methods=['POST'])
 def create_charge_with_tier():
-    data = request.get_json()
-    email = data.get('email')
-    user_key = data.get('licenseKey')
-    tier = data.get('tier')
-
-    if not all([email, user_key, tier]) or tier not in TIER_CONFIG:
-        return jsonify({'message': 'Missing or invalid information'}), 400
-
-    if License.query.filter_by(key=user_key).first():
-        return jsonify({'message': 'This License Key is already in use.'}), 409
-
-    tier_info = TIER_CONFIG[tier]
-    amount = tier_info['price_satang']
-
     try:
+        print("[DEBUG] เข้าสู่ฟังก์ชัน /create-charge-with-tier")
+        data = request.get_json()
+        email = data.get('email')
+        user_key = data.get('licenseKey')
+        tier = data.get('tier')
+        print(f"[DEBUG] ได้รับข้อมูล: email={email}, key={user_key}, tier={tier}")
+
+        if not all([email, user_key, tier]) or tier not in TIER_CONFIG:
+            print("[ERROR] ข้อมูลไม่ครบถ้วนหรือไม่ถูกต้อง")
+            return jsonify({'message': 'Missing or invalid information'}), 400
+
+        print("[DEBUG] กำลังตรวจสอบ License Key ที่มีอยู่...")
+        if License.query.filter_by(key=user_key).first():
+            print(f"[ERROR] License Key '{user_key}' ถูกใช้งานแล้ว")
+            return jsonify({'message': 'This License Key is already in use.'}), 409
+
+        tier_info = TIER_CONFIG[tier]
+        amount = tier_info['price_satang']
+        print(f"[DEBUG] Tier: {tier}, จำนวนเงิน: {amount}. กำลังเตรียมสร้าง Charge ของ Omise")
+
         charge = omise.Charge.create(
             amount=amount,
             currency='thb',
             source={'type': 'promptpay'},
             metadata={'email': email, 'requested_key': user_key, 'tier': tier}
         )
+        print(f"[DEBUG] สร้าง Charge ของ Omise สำเร็จ. Charge ID: {charge.id}")
+        
         new_license = License(
             key=f"PENDING-{user_key}",
             expires_on=date.today(),
@@ -116,14 +124,24 @@ def create_charge_with_tier():
             max_sessions=0
         )
         db.session.add(new_license)
+        print("[DEBUG] เพิ่ม License ที่รอการชำระเงินเข้าสู่ session")
         db.session.commit()
+        print("[DEBUG] บันทึก License ที่รอการชำระเงินลงฐานข้อมูลสำเร็จ")
         
         return jsonify({
             'chargeId': charge.id,
             'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
         })
+
     except Exception as e:
-        return jsonify({'message': str(e)}), 500
+        # โค้ดส่วนนี้จะดักจับ Error ทุกชนิด แล้วพิมพ์ออกมาใน Log
+        print("!!!!!!!!!!!!!!!!! เกิดข้อผิดพลาดร้ายแรง !!!!!!!!!!!!!!!!!")
+        print(f"[FATAL_ERROR] ประเภทของ Exception: {type(e)}")
+        print(f"[FATAL_ERROR] รายละเอียด Exception: {e}")
+        import traceback
+        traceback.print_exc() # คำสั่งนี้จะพิมพ์ Traceback ทั้งหมดออกมาใน Log
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        return jsonify({'message': 'An internal server error occurred.'}), 500
 
 @app.route('/check-charge-status')
 def check_charge_status():
