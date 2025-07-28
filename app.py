@@ -80,9 +80,9 @@ with app.app_context():
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
     'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1},
-    'basic3': {'price_satang': 180000, 'duration_days': 30, 'max_sessions': 3},
+    'basic3': {'price_satang': 180000, 'duration_days': 90, 'max_sessions': 3},
     'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1},
-    'pro3': {'price_satang': 450000, 'duration_days': 30, 'max_sessions': 3}
+    'pro3': {'price_satang': 450000, 'duration_days': 90, 'max_sessions': 3}
 }
 
 @app.route('/create-charge-with-tier', methods=['POST'])
