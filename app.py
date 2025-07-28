@@ -16,7 +16,8 @@ CORS(app)
 
 # --- ตั้งค่า Omise API Key จาก Environment Variables ---
 omise.api_version = '2019-05-29'
-omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
+# omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
+omise.secret_key = 'skey_test_64izw1rl4pobkqpl4kr' # ใส่ Key ของคุณตรงนี้
 YOUR_DOMAIN = os.environ.get('YOUR_DOMAIN') 
 
 # --- ตั้งค่าฐานข้อมูลสำหรับ Render Persistent Disk ---
