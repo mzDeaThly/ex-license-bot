@@ -201,10 +201,10 @@ def verify_license():
         license_entry = License.query.filter_by(key=key).first()
 
         if not license_entry or license_entry.tier == 'Pending':
-            return jsonify({'isValid': False, 'message': 'License Key not found or inactive.'}), 404
+            return jsonify({'isValid': False, 'message': 'ไม่พบ License key ที่ลงทะเบียน.'}), 404
 
         if license_entry.expires_on < date.today():
-            return jsonify({'isValid': False, 'message': 'This license has expired.'}), 403
+            return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาด License Key หมดอายุ.'}), 403
             
         session_token = uuid.uuid4().hex
         
