@@ -8,17 +8,17 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
-import omise # กลับมาใช้ Omise
+import omise
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- Omise API Key Setup from Environment Variables ---
+# --- Omise API Key Setup ---
 omise.api_version = '2019-05-29'
 omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
 
-# --- Database Setup (เหมือนเดิม) ---
+# --- Database Setup ---
 DISK_STORAGE_PATH = '/var/data'
 DATABASE_FILE = 'licenses.db'
 DATABASE_PATH = os.path.join(DISK_STORAGE_PATH, DATABASE_FILE)
@@ -29,7 +29,7 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default-secret-key-for-
 
 db = SQLAlchemy(app)
 
-# --- 2. Database Model (เหมือนเดิม) ---
+# --- 2. Database Model ---
 class License(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     key = db.Column(db.String(80), unique=True, nullable=False)
@@ -42,8 +42,7 @@ class License(db.Model):
     def __repr__(self):
         return f'<License {self.key}>'
 
-# --- 3 & 4. Admin Panel (เหมือนเดิม) ---
-# ... (ส่วนของ Admin Panel ไม่มีการเปลี่ยนแปลง) ...
+# --- 3. Admin Panel Protection ---
 def check_auth(username, password):
     admin_user = os.environ.get('ADMIN_USERNAME')
     admin_pass = os.environ.get('ADMIN_PASSWORD')
@@ -69,19 +68,21 @@ class ProtectedModelView(ModelView):
     def inaccessible_callback(self, name, **kwargs):
         return authenticate()
 
+# --- 4. Admin Panel Creation ---
 admin = Admin(app, name='License Manager', template_mode='bootstrap4', index_view=ProtectedAdminIndexView())
 admin.add_view(ProtectedModelView(License, db.session))
 
 with app.app_context():
     db.create_all()
 
-# --- 5. API Endpoints (กลับมาเป็นเวอร์ชัน Omise) ---
+# --- 5. API Endpoints ---
 TIER_CONFIG = {
     'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1},
     'basic3': {'price_satang': 180000, 'duration_days': 90, 'max_sessions': 3},
     'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1},
     'pro3': {'price_satang': 450000, 'duration_days': 90, 'max_sessions': 3}
 }
+SESSION_TIMEOUT_MINUTES = 10
 
 @app.route('/')
 def index():
@@ -110,8 +111,6 @@ def create_charge_with_tier():
             source={'type': 'promptpay'},
             metadata={'email': email, 'requested_key': user_key, 'tier': tier}
         )
-        
-        # เก็บ Charge ID ไว้เพื่อใช้อ้างอิง
         new_license = License(
             key=f"PENDING-{user_key}",
             expires_on=date.today(),
@@ -134,17 +133,15 @@ def check_charge_status():
     charge_id = request.args.get('charge_id')
     if not charge_id:
         return jsonify({'status': 'not_found', 'message': 'charge_id is required'}), 400
-
+        
     license_entry = License.query.filter_by(api_key=charge_id).first()
     
     if not license_entry:
         return jsonify({'status': 'not_found'})
         
-    # ตรวจสอบสถานะโดยตรงจาก Omise API เพื่อความแม่นยำ
     try:
         charge = omise.Charge.retrieve(charge_id)
         if charge.paid:
-             # ถ้าจ่ายแล้วแต่ใน DB ยังเป็น Pending ให้ทำการอัปเดต
             if license_entry.tier == 'Pending':
                 metadata = charge['metadata']
                 requested_key = metadata.get('requested_key')
@@ -161,10 +158,8 @@ def check_charge_status():
             return jsonify({'status': 'successful', 'license_key': license_entry.key})
         else:
             return jsonify({'status': 'pending'})
-
     except Exception as e:
          return jsonify({'status': 'error', 'message': str(e)})
-
 
 @app.route('/omise-webhook', methods=['POST'])
 def omise_webhook():
@@ -193,6 +188,39 @@ def omise_webhook():
             print(f"✅ Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
 
     return jsonify({'status': 'ok'})
+    
+@app.route('/verify-license', methods=['POST'])
+def verify_license():
+    try:
+        data = request.get_json()
+        key = data.get('licenseKey')
+
+        if not key:
+            return jsonify({'isValid': False, 'message': 'License Key is required.'}), 400
+
+        license_entry = License.query.filter_by(key=key).first()
+
+        if not license_entry or license_entry.tier == 'Pending':
+            return jsonify({'isValid': False, 'message': 'License Key not found or inactive.'}), 404
+
+        if license_entry.expires_on < date.today():
+            return jsonify({'isValid': False, 'message': 'This license has expired.'}), 403
+            
+        session_token = uuid.uuid4().hex
+        
+        # This is where you could add more complex session management logic
+        # For now, we'll just return a new token each time.
+        
+        return jsonify({
+            'isValid': True,
+            'message': 'License is valid.',
+            'apiKey': license_entry.api_key,
+            'sessionToken': session_token,
+            'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d')
+        })
+
+    except Exception as e:
+        return jsonify({'isValid': False, 'message': f'An server error occurred: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
