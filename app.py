@@ -24,7 +24,8 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     PushMessageRequest,
-    TextMessage
+    TextMessage,
+    MulticastRequest
 )
 from linebot.v3.webhooks import (
     MessageEvent,
@@ -40,10 +41,13 @@ omise.api_version = '2019-05-29'
 omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
 CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY') 
 
-# --- [เพิ่ม] LINE Bot Setup ---
+# --- [แก้ไข] LINE Bot Setup for Multiple Admins ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-LINE_ADMIN_USER_ID = os.environ.get('LINE_ADMIN_USER_ID')
+# อ่านค่า Admin ID ทั้งหมดแล้วแยกด้วยจุลภาค (,)
+LINE_ADMIN_USER_IDS_STR = os.environ.get('LINE_ADMIN_USER_ID', '')
+LINE_ADMIN_USER_IDS = [uid.strip() for uid in LINE_ADMIN_USER_IDS_STR.split(',') if uid.strip()]
+
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -105,22 +109,23 @@ admin.add_view(ProtectedModelView(License, db.session))
 with app.app_context():
     db.create_all()
 
-# --- [เพิ่ม] Helper Function for Sending LINE Message ---
+# --- [แก้ไข] Helper Function for Sending LINE Message to all Admins ---
 def send_line_message(message_text):
-    if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_ADMIN_USER_ID]):
+    if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_ADMIN_USER_IDS]):
         print("🚨 [LINE] ไม่สามารถส่งข้อความได้: กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_ADMIN_USER_ID")
         return
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message_with_http_info(
-                PushMessageRequest(
-                    to=LINE_ADMIN_USER_ID,
+            # ใช้ Multicast เพื่อส่งหา Admin ทุกคนในครั้งเดียว
+            line_bot_api.multicast(
+                MulticastRequest(
+                    to=LINE_ADMIN_USER_IDS,
                     messages=[TextMessage(text=message_text)]
                 )
             )
-        print(f"✅ [LINE] ส่งข้อความแจ้งเตือนสำเร็จ")
+        print(f"✅ [LINE] ส่งข้อความแจ้งเตือนไปยัง Admin {len(LINE_ADMIN_USER_IDS)} คนสำเร็จ")
     except Exception as e:
         print(f"🚨 [LINE] เกิดข้อผิดพลาดในการส่งข้อความ: {e}")
 
@@ -203,7 +208,6 @@ def check_charge_status():
                 license_entry.max_sessions = tier_info['max_sessions']
                 db.session.commit()
 
-                # --- [เพิ่ม] แจ้งเตือน LINE เมื่อมี License ใหม่ ---
                 message = (
                     f"🎉 มี License ใหม่!\n"
                     f"Key: {license_entry.key}\n"
@@ -244,7 +248,6 @@ def omise_webhook():
             db.session.commit()
             print(f"✅ Webhook: ชำระเงินสำเร็จ! เปิดใช้งาน License '{tier}': {requested_key}")
 
-            # --- [เพิ่ม] แจ้งเตือน LINE เมื่อมี License ใหม่ (จาก Webhook) ---
             message = (
                 f"🎉 มี License ใหม่! (Webhook)\n"
                 f"Key: {license_to_update.key}\n"
@@ -285,7 +288,6 @@ def verify_license():
 
         while len(active_sessions) > max_sessions_int:
             active_sessions.pop(0)
-            # --- [เพิ่ม] แจ้งเตือน LINE เมื่อ Session เกินกำหนด ---
             message = f"⚠️ Session เกินกำหนด!\nKey: {license_entry.key}\nมีการพยายามเข้าสู่ระบบครั้งใหม่ ทำให้ Session เก่าถูกตัดการเชื่อมต่อ"
             send_line_message(message)
         
@@ -333,7 +335,7 @@ def heartbeat():
     except Exception as e:
         return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
-# --- [เพิ่ม] 6. LINE Messaging API Webhook ---
+# --- 6. LINE Messaging API Webhook ---
 @app.route("/line-webhook", methods=['POST'])
 def line_webhook():
     signature = request.headers['X-Line-Signature']
@@ -352,8 +354,8 @@ def handle_message(event):
     text = event.message.text
     user_id = event.source.user_id
 
-    # --- ระบบแบน: ตรวจสอบว่าเป็นคำสั่งจาก Admin หรือไม่ ---
-    if user_id == LINE_ADMIN_USER_ID and text.lower().startswith('ban '):
+    # --- [แก้ไข] ระบบแบน: ตรวจสอบว่า user_id อยู่ในรายชื่อ Admin หรือไม่ ---
+    if user_id in LINE_ADMIN_USER_IDS and text.lower().startswith('ban '):
         parts = text.split(' ')
         if len(parts) == 2:
             key_to_ban = parts[1]
@@ -361,12 +363,11 @@ def handle_message(event):
             
             reply_text = ""
             if license_to_ban:
-                # ทำให้ License หมดอายุโดยการตั้งค่าวันหมดอายุเป็นเมื่อวาน
                 license_to_ban.expires_on = date.today() - timedelta(days=1)
-                license_to_ban.active_sessions = '[]' # ล้าง session ที่ใช้งานอยู่
+                license_to_ban.active_sessions = '[]'
                 db.session.commit()
                 reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
-                print(f"🚫 [LINE COMMAND] แบน License '{key_to_ban}' โดย Admin")
+                print(f"🚫 [LINE COMMAND] แบน License '{key_to_ban}' โดย Admin ({user_id})")
             else:
                 reply_text = f"ไม่พบ License Key '{key_to_ban}' ในระบบ"
             
