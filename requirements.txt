@@ -7,3 +7,4 @@ gunicorn==22.0.0
 omise==0.15.0
 setuptools==69.5.1
 APScheduler==3.10.4
+line-bot-sdk==3.3.0
