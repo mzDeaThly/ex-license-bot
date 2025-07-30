@@ -14,9 +14,11 @@ import omise
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- Omise API Key Setup ---
+# --- API Key Setup from Environment Variables ---
 omise.api_version = '2019-05-29'
 omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
+# --- [เพิ่ม] ดึงค่า Capsolver API Key จาก Environment ---
+CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY') 
 
 # --- Database Setup ---
 DISK_STORAGE_PATH = '/var/data'
@@ -149,7 +151,8 @@ def check_charge_status():
 
                 license_entry.key = requested_key
                 license_entry.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-                license_entry.api_key = "CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1"
+                # --- [แก้ไข] ใช้ค่าจาก Environment ---
+                license_entry.api_key = CAPSOLVER_API_KEY
                 license_entry.tier = tier
                 license_entry.max_sessions = tier_info['max_sessions']
                 db.session.commit()
@@ -179,7 +182,8 @@ def omise_webhook():
             tier_info = TIER_CONFIG[tier]
             license_to_update.key = requested_key
             license_to_update.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-            license_to_update.api_key = "CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1"
+            # --- [แก้ไข] ใช้ค่าจาก Environment ---
+            license_to_update.api_key = CAPSOLVER_API_KEY
             license_to_update.tier = tier
             license_to_update.max_sessions = tier_info['max_sessions']
             
@@ -234,7 +238,7 @@ def verify_license():
         return jsonify({
             'isValid': True,
             'message': 'License ใช้งานได้',
-            'apiKey': license_entry.api_key,
+            'apiKey': license_entry.api_key, # ส่ง key ที่อ่านจาก DB ซึ่งตอนนี้มาจาก Environment
             'sessionToken': session_token,
             'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d')
         })
