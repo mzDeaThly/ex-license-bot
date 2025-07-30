@@ -3,13 +3,33 @@ import json
 import uuid
 from datetime import datetime, date, timedelta
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, abort
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
 import omise
-from apscheduler.schedulers.background import BackgroundScheduler # [เพิ่ม] import APScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# --- [เพิ่ม] LINE SDK Imports ---
+from linebot.v3 import (
+    WebhookHandler
+)
+from linebot.v3.exceptions import (
+    InvalidSignatureError
+)
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    ReplyMessageRequest,
+    PushMessageRequest,
+    TextMessage
+)
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent
+)
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
@@ -19,6 +39,14 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 omise.api_version = '2019-05-29'
 omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
 CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY') 
+
+# --- [เพิ่ม] LINE Bot Setup ---
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
+LINE_ADMIN_USER_ID = os.environ.get('LINE_ADMIN_USER_ID')
+
+configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- Database Setup ---
 DISK_STORAGE_PATH = '/var/data'
@@ -76,6 +104,25 @@ admin.add_view(ProtectedModelView(License, db.session))
 
 with app.app_context():
     db.create_all()
+
+# --- [เพิ่ม] Helper Function for Sending LINE Message ---
+def send_line_message(message_text):
+    if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_ADMIN_USER_ID]):
+        print("🚨 [LINE] ไม่สามารถส่งข้อความได้: กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_ADMIN_USER_ID")
+        return
+
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message_with_http_info(
+                PushMessageRequest(
+                    to=LINE_ADMIN_USER_ID,
+                    messages=[TextMessage(text=message_text)]
+                )
+            )
+        print(f"✅ [LINE] ส่งข้อความแจ้งเตือนสำเร็จ")
+    except Exception as e:
+        print(f"🚨 [LINE] เกิดข้อผิดพลาดในการส่งข้อความ: {e}")
 
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
@@ -155,6 +202,15 @@ def check_charge_status():
                 license_entry.tier = tier
                 license_entry.max_sessions = tier_info['max_sessions']
                 db.session.commit()
+
+                # --- [เพิ่ม] แจ้งเตือน LINE เมื่อมี License ใหม่ ---
+                message = (
+                    f"🎉 มี License ใหม่!\n"
+                    f"Key: {license_entry.key}\n"
+                    f"Max Sessions: {license_entry.max_sessions}\n"
+                    f"หมดอายุ: {license_entry.expires_on.strftime('%Y-%m-%d')}"
+                )
+                send_line_message(message)
             
             return jsonify({'status': 'successful', 'license_key': license_entry.key})
         else:
@@ -188,6 +244,15 @@ def omise_webhook():
             db.session.commit()
             print(f"✅ Webhook: ชำระเงินสำเร็จ! เปิดใช้งาน License '{tier}': {requested_key}")
 
+            # --- [เพิ่ม] แจ้งเตือน LINE เมื่อมี License ใหม่ (จาก Webhook) ---
+            message = (
+                f"🎉 มี License ใหม่! (Webhook)\n"
+                f"Key: {license_to_update.key}\n"
+                f"Max Sessions: {license_to_update.max_sessions}\n"
+                f"หมดอายุ: {license_to_update.expires_on.strftime('%Y-%m-%d')}"
+            )
+            send_line_message(message)
+
     return jsonify({'status': 'ok'})
     
 @app.route('/verify-license', methods=['POST'])
@@ -220,6 +285,9 @@ def verify_license():
 
         while len(active_sessions) > max_sessions_int:
             active_sessions.pop(0)
+            # --- [เพิ่ม] แจ้งเตือน LINE เมื่อ Session เกินกำหนด ---
+            message = f"⚠️ Session เกินกำหนด!\nKey: {license_entry.key}\nมีการพยายามเข้าสู่ระบบครั้งใหม่ ทำให้ Session เก่าถูกตัดการเชื่อมต่อ"
+            send_line_message(message)
         
         license_entry.active_sessions = json.dumps(active_sessions)
         db.session.commit()
@@ -265,12 +333,54 @@ def heartbeat():
     except Exception as e:
         return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
-# --- 6. Scheduled Job for Clearing Sessions ---
+# --- [เพิ่ม] 6. LINE Messaging API Webhook ---
+@app.route("/line-webhook", methods=['POST'])
+def line_webhook():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        app.logger.info("Invalid signature. Please check your channel secret.")
+        abort(400)
+    return 'OK'
+
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    text = event.message.text
+    user_id = event.source.user_id
+
+    # --- ระบบแบน: ตรวจสอบว่าเป็นคำสั่งจาก Admin หรือไม่ ---
+    if user_id == LINE_ADMIN_USER_ID and text.lower().startswith('ban '):
+        parts = text.split(' ')
+        if len(parts) == 2:
+            key_to_ban = parts[1]
+            license_to_ban = License.query.filter_by(key=key_to_ban).first()
+            
+            reply_text = ""
+            if license_to_ban:
+                # ทำให้ License หมดอายุโดยการตั้งค่าวันหมดอายุเป็นเมื่อวาน
+                license_to_ban.expires_on = date.today() - timedelta(days=1)
+                license_to_ban.active_sessions = '[]' # ล้าง session ที่ใช้งานอยู่
+                db.session.commit()
+                reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
+                print(f"🚫 [LINE COMMAND] แบน License '{key_to_ban}' โดย Admin")
+            else:
+                reply_text = f"ไม่พบ License Key '{key_to_ban}' ในระบบ"
+            
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_text)]
+                    )
+                )
+
+# --- 7. Scheduled Job for Clearing Sessions ---
 def clear_all_sessions():
-    """
-    ฟังก์ชันสำหรับล้างข้อมูล active_sessions ทั้งหมดในฐานข้อมูล
-    จะถูกเรียกใช้งานโดย APScheduler
-    """
     with app.app_context():
         try:
             num_updated = License.query.update({License.active_sessions: '[]'})
@@ -283,7 +393,6 @@ def clear_all_sessions():
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(clear_all_sessions, 'interval', minutes=15)
 scheduler.start()
-# --- จบส่วนที่เพิ่ม ---
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
