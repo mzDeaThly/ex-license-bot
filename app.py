@@ -206,13 +206,34 @@ def verify_license():
         if license_entry.expires_on < date.today():
             return jsonify({'isValid': False, 'message': 'License นี้หมดอายุแล้ว'}), 403
             
+        # --- [เพิ่ม] Logic การสร้างและจัดการ Session ---
         session_token = uuid.uuid4().hex
+        
+        # โหลดรายการ session ที่มีอยู่ (เป็น string json)
+        try:
+            active_sessions = json.loads(license_entry.active_sessions)
+        except (json.JSONDecodeError, TypeError):
+            active_sessions = []
+
+        # เพิ่ม session ใหม่เข้าไป
+        active_sessions.append(session_token)
+
+        # ถ้าจำนวน session เกินกว่าที่แพ็กเกจกำหนด ให้ลบ session ที่เก่าที่สุดออก
+        while len(active_sessions) > license_entry.max_sessions:
+            active_sessions.pop(0)
+        
+        # บันทึกกลับลงฐานข้อมูล (เป็น string json)
+        license_entry.active_sessions = json.dumps(active_sessions)
+        db.session.commit()
+        
+        print(f"✅ สร้าง Session ใหม่สำหรับ License '{key}': {session_token}")
+        # --- จบส่วนที่เพิ่ม ---
         
         return jsonify({
             'isValid': True,
             'message': 'License ใช้งานได้',
             'apiKey': license_entry.api_key,
-            'sessionToken': session_token,
+            'sessionToken': session_token, # ส่ง token ใหม่กลับไป
             'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d')
         })
 
@@ -234,10 +255,19 @@ def heartbeat():
         if not license_entry:
             return jsonify({'message': 'ไม่พบ License'}), 404
         
-        # NOTE: For a real-world scenario, you would implement a more robust
-        # session check here against the `active_sessions` field.
-        # For this version, we will always return a success status
-        # to allow the extension's primary logic to function.
+        # --- [เพิ่ม] Logic การตรวจสอบ Session ---
+        try:
+            active_sessions = json.loads(license_entry.active_sessions)
+        except (json.JSONDecodeError, TypeError):
+            active_sessions = []
+        
+        # ตรวจสอบว่า session token ที่ส่งมายังอยู่ในรายการที่ได้รับอนุญาตหรือไม่
+        if session_token not in active_sessions:
+            print(f"🚨 Session ไม่ถูกต้องสำหรับ License '{key}'. อาจมีการใช้งานจากเครื่องอื่น")
+            return jsonify({'message': 'Invalid session. Please verify your license again.'}), 403 # ส่ง 403!
+        
+        print(f"❤️ Heartbeat สำเร็จสำหรับ License '{key}'")
+        # --- จบส่วนที่เพิ่ม ---
         
         return jsonify({'status': 'ok', 'message': 'Session ใช้งานได้'}), 200
 
