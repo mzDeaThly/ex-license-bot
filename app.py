@@ -3,21 +3,29 @@ import json
 import uuid
 from datetime import datetime, date, timedelta
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, redirect, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
-import omise
+
+import stripe # Import Stripe library
+# You might need to install: pip install stripe
 
 # --- 1. ตั้งค่าพื้นฐาน ---
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app)
 
-# --- ตั้งค่า Omise API Key จาก Environment Variables ---
-omise.api_version = '2019-05-29'
-omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
-YOUR_DOMAIN = os.environ.get('YOUR_DOMAIN') 
+# --- Stripe API Settings ---
+stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET') # For verifying webhooks
+YOUR_DOMAIN = os.environ.get('YOUR_DOMAIN') # e.g., https://your-app-name.onrender.com
+
+# Ensure YOUR_DOMAIN is set for success/cancel URLs
+if not YOUR_DOMAIN:
+    print("WARNING: YOUR_DOMAIN environment variable is not set. Set it to your Render app's URL for Stripe redirects to work correctly.")
+    # Fallback for local development, not suitable for production
+    YOUR_DOMAIN = "http://localhost:5000" 
 
 # --- ตั้งค่าฐานข้อมูลสำหรับ Render Persistent Disk ---
 DISK_STORAGE_PATH = '/var/data'
@@ -35,10 +43,14 @@ class License(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     key = db.Column(db.String(80), unique=True, nullable=False)
     expires_on = db.Column(db.Date, nullable=False)
-    api_key = db.Column(db.String(120), nullable=False)
+    api_key = db.Column(db.String(120), nullable=False) # This will now store Capsolver API key or similar
     tier = db.Column(db.String(50), default='Basic')
     max_sessions = db.Column(db.Integer, default=1)
     active_sessions = db.Column(db.Text, default='[]')
+    
+    # New fields for Stripe payment tracking
+    stripe_session_id = db.Column(db.String(200), unique=True, nullable=True) # Stripe Checkout Session ID
+    stripe_payment_status = db.Column(db.String(50), default='PENDING') # 'PENDING', 'PAID', 'FAILED'
 
     def __repr__(self):
         return f'<License {self.key}>'
@@ -81,10 +93,10 @@ with app.app_context():
 
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
-    'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1},
-    'basic3': {'price_satang': 180000, 'duration_days': 30, 'max_sessions': 3},
-    'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1},
-    'pro3': {'price_satang': 450000, 'duration_days': 30, 'max_sessions': 3}
+    'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1, 'name': 'Basic (1 เดือน 1 Session)'},
+    'basic3': {'price_satang': 180000, 'duration_days': 30, 'max_sessions': 3, 'name': 'Basic (1 เดือน 3 Session)'},
+    'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1, 'name': 'Pro (1 เดือน 1 Session)'},
+    'pro3': {'price_satang': 450000, 'duration_days': 30, 'max_sessions': 3, 'name': 'Pro (1 เดือน 3 Session)'}
 }
 SESSION_TIMEOUT_MINUTES = 10
 
@@ -103,12 +115,11 @@ def get_active_sessions(license_obj):
 
 @app.route('/')
 def index():
-    # Endpoint นี้อาจจะไม่จำเป็นถ้าคุณไม่ได้โฮสต์หน้าเว็บหลักที่นี่
-    # แต่การมีไว้ก็ไม่เสียหาย
     return "License Server is running."
 
-@app.route('/create-charge-with-tier', methods=['POST'])
-def create_charge_with_tier():
+# --- NEW: Stripe Checkout Session creation endpoint ---
+@app.route('/create-stripe-checkout-session', methods=['POST'])
+def create_stripe_checkout_session():
     try:
         data = request.get_json()
         email = data.get('email')
@@ -122,79 +133,183 @@ def create_charge_with_tier():
             return jsonify({'message': 'This License Key is already in use.'}), 409
 
         tier_info = TIER_CONFIG[tier]
-        amount = tier_info['price_satang']
+        amount_satang = tier_info['price_satang']
+        tier_name = tier_info['name']
 
-        charge = omise.Charge.create(
-            amount=amount,
-            currency='thb',
-            source={'type': 'promptpay'},
-            metadata={'email': email, 'requested_key': user_key, 'tier': tier}
-        )
+        # Create a new License entry with PENDING status
+        # We'll link this to the Stripe Session ID
         new_license = License(
             key=f"PENDING-{user_key}",
-            expires_on=date.today(),
-            api_key=charge.id,
-            tier='Pending',
-            max_sessions=0
+            expires_on=date.today(), # Temp date
+            api_key="PENDING", # Temp API key
+            tier=tier.capitalize(), # Store original tier name for later activation
+            max_sessions=0, # Temp sessions
+            stripe_payment_status='PENDING'
         )
         db.session.add(new_license)
+        db.session.commit() # Commit to get an ID for metadata
+
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['promptpay', 'card'], # Enable PromptPay and Card
+            line_items=[
+                {
+                    'price_data': {
+                        'currency': 'thb',
+                        'unit_amount': amount_satang,
+                        'product_data': {
+                            'name': f'License Key: {tier_name}',
+                            'description': f'License for {tier_name}',
+                        },
+                    },
+                    'quantity': 1,
+                }
+            ],
+            mode='payment',
+            success_url=f'{YOUR_DOMAIN}/check-stripe-payment-status?session_id={{CHECKOUT_SESSION_ID}}&license_id={new_license.id}',
+            cancel_url=f'{YOUR_DOMAIN}/register.html?status=cancelled',
+            metadata={
+                'license_id': new_license.id,
+                'requested_key': user_key,
+                'tier': tier,
+                'email': email
+            }
+        )
+
+        # Update the license entry with Stripe Session ID
+        new_license.stripe_session_id = checkout_session.id
         db.session.commit()
         
-        return jsonify({
-            'chargeId': charge.id,
-            'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
-        })
+        return jsonify({'checkoutUrl': checkout_session.url})
+    except stripe.error.StripeError as e:
+        print(f"Stripe API error: {e}")
+        return jsonify({'message': str(e)}), 500
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'message': str(e)}), 500
 
-@app.route('/check-charge-status')
-def check_charge_status():
-    charge_id = request.args.get('charge_id')
-    license_entry = License.query.filter_by(api_key=charge_id).first()
-    
-    if not license_entry:
-        return jsonify({'status': 'not_found'})
+# --- NEW: Endpoint for checking Stripe payment status after redirect ---
+@app.route('/check-stripe-payment-status')
+def check_stripe_payment_status():
+    session_id = request.args.get('session_id')
+    license_id = request.args.get('license_id')
+
+    if not session_id or not license_id:
+        return redirect(f'{YOUR_DOMAIN}/register.html?status=error&message=Missing_Stripe_Session_ID_or_License_ID')
+
+    license_obj = License.query.filter_by(id=license_id, stripe_session_id=session_id).first()
+
+    if not license_obj:
+        return redirect(f'{YOUR_DOMAIN}/register.html?status=error&message=License_or_Session_not_found')
+
+    # If the license is already activated by webhook, redirect
+    if license_obj.stripe_payment_status == 'PAID':
+        return redirect(f'{YOUR_DOMAIN}/register.html?status=success&license_key={license_obj.key}')
+
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+
+        if session.payment_status == 'paid':
+            # This logic should ideally be handled by the webhook for robustness,
+            # but we can update here as a fallback/for immediate feedback
+            # In a real app, ensure this doesn't create duplicate activation
+            print(f"Stripe Status Check: Session {session_id} is paid. Activating license {license_obj.key}")
+            tier_info = TIER_CONFIG[license_obj.tier.lower()]
+            license_obj.key = session.metadata.get('requested_key', license_obj.key) # Use key from metadata or original
+            license_obj.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
+            license_obj.api_key = "CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1"
+            license_obj.tier = license_obj.tier.capitalize()
+            license_obj.max_sessions = tier_info['max_sessions']
+            license_obj.stripe_payment_status = 'PAID'
+            db.session.commit()
+            return redirect(f'{YOUR_DOMAIN}/register.html?status=success&license_key={license_obj.key}')
+        elif session.payment_status == 'unpaid' or session.status == 'open':
+            # Payment still pending or user closed checkout
+            print(f"Stripe Status Check: Session {session_id} status is {session.payment_status}/{session.status}. Still pending.")
+            return redirect(f'{YOUR_DOMAIN}/register.html?status=pending&message=Payment_still_pending')
+        else:
+            # Payment failed or cancelled by user
+            print(f"Stripe Status Check: Session {session_id} status is {session.payment_status}/{session.status}. Failed/Cancelled.")
+            license_obj.stripe_payment_status = 'FAILED'
+            db.session.commit()
+            return redirect(f'{YOUR_DOMAIN}/register.html?status=failed&message=Payment_failed_or_cancelled')
+
+    except stripe.error.StripeError as e:
+        print(f"Stripe API error retrieving session: {e}")
+        return redirect(f'{YOUR_DOMAIN}/register.html?status=error&message=Stripe_API_error:{str(e)}')
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return redirect(f'{YOUR_DOMAIN}/register.html?status=error&message=Internal_server_error:{str(e)}')
+
+# --- NEW: Stripe Webhook endpoint ---
+@app.route('/stripe-webhook', methods=['POST'])
+def stripe_webhook():
+    payload = request.get_data()
+    sig_header = request.headers.get('stripe-signature')
+    event = None
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        # Invalid payload
+        return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        return 'Invalid signature', 400
+
+    # Handle the checkout.session.completed event
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object'] # contains a stripe.checkout.Session
         
-    if license_entry.tier == 'Pending':
-        return jsonify({'status': 'pending'})
-    else:
-        return jsonify({'status': 'successful', 'license_key': license_entry.key})
+        # Retrieve metadata
+        license_id = session.metadata.get('license_id')
+        requested_key = session.metadata.get('requested_key')
+        tier = session.metadata.get('tier')
+        email = session.metadata.get('email')
 
-@app.route('/omise-webhook', methods=['POST'])
-def omise_webhook():
-    event = request.get_json()
-    # For production, it's better to verify the webhook signature
-    # but for now, we'll trust the event based on the secret URL.
-    if event.get('key') == 'charge.complete':
-        charge_data = event['data']
-        if charge_data.get('status') == 'successful':
-            charge_id = charge_data['id']
-            metadata = charge_data['metadata']
-            requested_key = metadata.get('requested_key')
-            tier = metadata.get('tier')
-
-            if not all([requested_key, tier]) or tier not in TIER_CONFIG:
-                return jsonify({'status': 'error', 'message': 'Missing metadata'})
-
-            license_to_update = License.query.filter_by(api_key=charge_id, tier='Pending').first()
-            
-            if license_to_update:
+        if license_id:
+            license_obj = License.query.get(license_id)
+            if license_obj and license_obj.stripe_payment_status == 'PENDING':
+                # Activate the license
                 tier_info = TIER_CONFIG[tier]
-                license_to_update.key = requested_key
-                license_to_update.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-                license_to_update.api_key = "YOUR_DEFAULT_CAPSOLVER_API_KEY"
-                license_to_update.tier = tier.capitalize()
-                license_to_update.max_sessions = tier_info['max_sessions']
-                
+                license_obj.key = requested_key # Finalize the actual license key
+                license_obj.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
+                license_obj.api_key = "YOUR_DEFAULT_CAPSOLVER_API_KEY" # Set default API key
+                license_obj.tier = tier.capitalize()
+                license_obj.max_sessions = tier_info['max_sessions']
+                license_obj.stripe_payment_status = 'PAID' # Mark as paid
                 db.session.commit()
-                print(f"✅ Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
+                print(f"✅ Stripe Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
+            else:
+                print(f"Stripe Webhook: License {license_id} not found or already processed.")
+        else:
+            print("Stripe Webhook: license_id not found in metadata.")
 
-    return jsonify({'status': 'ok'})
+    elif event['type'] == 'checkout.session.async_payment_succeeded':
+        session = event['data']['object']
+        # Handle async payment success (e.g., bank transfers that take time)
+        print(f"Stripe Webhook: Async payment succeeded for session {session.id}. Review and activate if not already.")
+        # Similar activation logic as above, but ensure idempotency
 
+    elif event['type'] == 'checkout.session.async_payment_failed':
+        session = event['data']['object']
+        print(f"Stripe Webhook: Async payment failed for session {session.id}. Mark license as failed.")
+        license_id = session.metadata.get('license_id')
+        if license_id:
+            license_obj = License.query.get(license_id)
+            if license_obj and license_obj.stripe_payment_status == 'PENDING':
+                license_obj.stripe_payment_status = 'FAILED'
+                db.session.commit()
+
+
+    return jsonify(success=True), 200
+
+# --- Existing /verify-license and /heartbeat endpoints (unchanged logic) ---
 @app.route('/verify-license', methods=['POST'])
-def verify_license_main(): # Renamed to avoid conflict with the original verify_license
+def verify_license_main():
     data = request.get_json()
     license_key = data.get('licenseKey')
 
@@ -205,9 +320,17 @@ def verify_license_main(): # Renamed to avoid conflict with the original verify_
 
     if not license_obj:
         return jsonify({'isValid': False, 'message': 'License Key ไม่ถูกต้อง'}), 401
+    
+    # Check if this license was a PENDING Stripe payment that failed
+    if license_obj.key.startswith('PENDING-') and license_obj.stripe_payment_status == 'FAILED':
+         return jsonify({'isValid': False, 'message': 'License Key นี้ไม่สามารถใช้งานได้ เนื่องจากการชำระเงินไม่สำเร็จ'}), 403
 
     if license_obj.expires_on < date.today():
         return jsonify({'isValid': False, 'message': f'License Key หมดอายุแล้วเมื่อวันที่ {license_obj.expires_on}'}), 403
+    
+    # Do not allow PENDING keys to be verified unless explicitly set up to activate on first use
+    if license_obj.stripe_payment_status == 'PENDING':
+         return jsonify({'isValid': False, 'message': 'License Key นี้ยังอยู่ระหว่างรอการชำระเงิน'}), 403
 
     active_sessions = get_active_sessions(license_obj)
     
@@ -265,4 +388,7 @@ def heartbeat():
 
 # --- 6. Run Application ---
 if __name__ == '__main__':
+    # Ensure DISK_STORAGE_PATH exists for SQLite DB
+    if not os.path.exists(DISK_STORAGE_PATH):
+        os.makedirs(DISK_STORAGE_PATH)
     app.run(host='0.0.0.0', port=5000)
