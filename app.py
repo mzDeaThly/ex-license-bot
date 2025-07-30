@@ -359,15 +359,14 @@ def handle_message(event):
     user_id = event.source.user_id
     reply_token = event.reply_token
 
+    reply_text = ""
+
     # ตรวจสอบก่อนว่าผู้ส่งเป็น Admin หรือไม่
     if user_id not in LINE_ADMIN_USER_IDS:
-        return # ไม่ใช่ Admin, ไม่ต้องทำอะไร
+        reply_text = "⛔️ บัญชีนี้ไม่ได้รับสิทธิ์ใช้งานบอท\nกรุณาติดต่อผู้ดูแลระบบ"
 
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        reply_text = ""
-
-        # --- [แก้ไข] เพิ่มการจัดการคำสั่งหลายรูปแบบ ---
+    else:
+        # เป็นแอดมิน → จัดการคำสั่ง
         if text.startswith('ban '):
             parts = text.split(' ')
             if len(parts) == 2:
@@ -381,7 +380,7 @@ def handle_message(event):
                 else:
                     reply_text = f"ไม่พบ License Key '{key_to_ban}'"
             else:
-                reply_text = "รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: ban KEY-123"
+                reply_text = "❗️รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: ban KEY-123"
 
         elif text == 'check':
             active_licenses = License.query.filter(License.expires_on >= date.today()).all()
@@ -396,7 +395,7 @@ def handle_message(event):
                 
                 details_text = "\n".join(details)
                 reply_text = f"📊 License ที่ใช้งานได้: {count} รายการ\n\n{details_text}"
-            
+
         elif text.startswith('notify '):
             parts = text.split(' ')
             if len(parts) == 2:
@@ -404,34 +403,41 @@ def handle_message(event):
                 license_to_notify = License.query.filter_by(key=key_to_notify).first()
 
                 if license_to_notify:
-                    # สร้างข้อความสถานะ
                     status_message = (
                         f"🔔 แจ้งเตือนสถานะ License\n"
                         f"Key: {license_to_notify.key}\n"
                         f"Max Sessions: {license_to_notify.max_sessions}\n"
                         f"หมดอายุ: {license_to_notify.expires_on.strftime('%Y-%m-%d')}"
                     )
-                    # ส่งแจ้งเตือนไปหา Admin ทุกคน
                     send_line_message(status_message)
-                    # ตอบกลับหาคนที่ส่งคำสั่ง
                     reply_text = f"✅ ส่งการแจ้งเตือนสำหรับ '{key_to_notify}' เรียบร้อย"
                 else:
                     reply_text = f"ไม่พบ License Key '{key_to_notify}'"
             else:
-                reply_text = "รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: notify KEY-123"
-        
-        else:
-            # ถ้าไม่ตรงกับคำสั่งใดๆ อาจจะส่งข้อความช่วยเหลือ
-            reply_text = "คำสั่งที่ไม่รู้จัก\nคำสั่งที่ใช้ได้:\n- ban <key>\n- check\n- notify <key>"
+                reply_text = "❗️รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: notify KEY-123"
 
-        # ส่งข้อความตอบกลับถ้ามี
-        if reply_text:
+        else:
+            reply_text = (
+                "คำสั่งที่ใช้ได้:\n"
+                "ban <key>\n"
+                "check\n"
+                "notify <key>"
+                "<key> << ให้พิมพ์ user license key ได้เลย ไม่ต้องมี <>"
+            )
+
+    # ส่งข้อความตอบกลับ (ใช้ reply_token ได้แค่ครั้งเดียว)
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
                     messages=[TextMessage(text=reply_text)]
                 )
             )
+    except Exception as e:
+        print(f"🚨 [LINE BOT] ตอบกลับไม่ได้: {e}")
+
 
 # --- 7. Scheduled Job for Clearing Sessions ---
 def clear_all_sessions():
