@@ -9,6 +9,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
 import omise
+from apscheduler.schedulers.background import BackgroundScheduler # [เพิ่ม] import APScheduler
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
@@ -206,9 +207,6 @@ def verify_license():
         if license_entry.expires_on < date.today():
             return jsonify({'isValid': False, 'message': 'License นี้หมดอายุแล้ว'}), 403
             
-        print(f"[DEBUG] ตรวจสอบ License: {key}")
-        print(f"[DEBUG] ค่า max_sessions ที่อ่านจาก DB: {license_entry.max_sessions} (ประเภท: {type(license_entry.max_sessions)})")
-
         session_token = uuid.uuid4().hex
         
         try:
@@ -218,19 +216,13 @@ def verify_license():
 
         active_sessions.append(session_token)
         
-        print(f"[DEBUG] จำนวน session ปัจจุบัน (ก่อนลบ): {len(active_sessions)}")
-        
         max_sessions_int = int(license_entry.max_sessions or 1)
 
         while len(active_sessions) > max_sessions_int:
-            removed_session = active_sessions.pop(0)
-            print(f"[DEBUG] Session เกินกำหนด! ลบ session เก่า: {removed_session}")
+            active_sessions.pop(0)
         
         license_entry.active_sessions = json.dumps(active_sessions)
         db.session.commit()
-        
-        print(f"[DEBUG] สร้าง Session ใหม่: {session_token}")
-        print(f"[DEBUG] รายการ Session ที่ใช้งานได้: {license_entry.active_sessions}")
         
         return jsonify({
             'isValid': True,
@@ -243,7 +235,6 @@ def verify_license():
         })
 
     except Exception as e:
-        print(f"[ERROR] เกิดข้อผิดพลาดใน /verify-license: {str(e)}")
         return jsonify({'isValid': False, 'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
 @app.route('/heartbeat', methods=['POST'])
@@ -267,16 +258,32 @@ def heartbeat():
             active_sessions = []
         
         if session_token not in active_sessions:
-            print(f"🚨 [HEARTBEAT] Session ไม่ถูกต้องสำหรับ License '{key}'. อาจมีการใช้งานจากเครื่องอื่น")
             return jsonify({'message': 'Session ไม่ถูกต้อง อาจมีการใช้งานจากเครื่องอื่น'}), 403
-        
-        print(f"❤️ [HEARTBEAT] สำเร็จสำหรับ License '{key}'")
         
         return jsonify({'status': 'ok', 'message': 'Session ใช้งานได้'}), 200
 
     except Exception as e:
-        print(f"[ERROR] เกิดข้อผิดพลาดใน /heartbeat: {str(e)}")
         return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
+
+# --- 6. Scheduled Job for Clearing Sessions ---
+def clear_all_sessions():
+    """
+    ฟังก์ชันสำหรับล้างข้อมูล active_sessions ทั้งหมดในฐานข้อมูล
+    จะถูกเรียกใช้งานโดย APScheduler
+    """
+    with app.app_context():
+        try:
+            num_updated = License.query.update({License.active_sessions: '[]'})
+            db.session.commit()
+            print(f"✅ [CRON JOB] ล้างข้อมูล Session ทั้งหมด {num_updated} รายการสำเร็จ")
+        except Exception as e:
+            db.session.rollback()
+            print(f"🚨 [CRON JOB] เกิดข้อผิดพลาดในการล้างข้อมูล Session: {str(e)}")
+
+scheduler = BackgroundScheduler(daemon=True)
+scheduler.add_job(clear_all_sessions, 'interval', minutes=15)
+scheduler.start()
+# --- จบส่วนที่เพิ่ม ---
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
