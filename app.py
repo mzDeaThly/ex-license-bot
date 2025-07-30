@@ -421,7 +421,7 @@ def handle_message(event):
                 "คำสั่งที่ใช้ได้:\n"
                 "ban <key>\n"
                 "check\n"
-                "notify <key>"
+                "notify <key>\n"
                 "<key> << ให้พิมพ์ user license key ได้เลย ไม่ต้องมี <>"
             )
 
