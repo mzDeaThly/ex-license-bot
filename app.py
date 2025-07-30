@@ -18,12 +18,11 @@ CORS(app)
 # --- Stripe API Settings ---
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
-YOUR_DOMAIN = os.environ.get('https://ex-license-bot.onrender.com')
+YOUR_DOMAIN = os.environ.get('YOUR_DOMAIN')
 
 # Ensure YOUR_DOMAIN is set for success/cancel URLs
 if not YOUR_DOMAIN:
     print("WARNING: YOUR_DOMAIN environment variable is not set. Set it to your Render app's URL for Stripe redirects to work correctly.")
-    # Fallback for local development, not suitable for production
     YOUR_DOMAIN = "http://localhost:5000"
 
 # --- NEW: Add Content Security Policy Header ---
@@ -107,14 +106,31 @@ SESSION_TIMEOUT_MINUTES = 10
 
 def get_active_sessions(license_obj):
     """ดึงและทำความสะอาด active sessions ที่หมดอายุแล้ว"""
-    sessions = json.loads(license_obj.active_sessions)
+    if not license_obj.active_sessions: # Handle empty or None string
+        return []
+    try:
+        sessions = json.loads(license_obj.active_sessions)
+        if not isinstance(sessions, list): # Ensure it's a list
+            print(f"WARNING: active_sessions for {license_obj.key} is not a list. Resetting.")
+            return []
+    except json.JSONDecodeError:
+        print(f"WARNING: Invalid JSON in active_sessions for {license_obj.key}. Resetting.")
+        return []
+        
     fresh_sessions = []
     now = datetime.utcnow()
     
     for session in sessions:
-        last_seen = datetime.fromisoformat(session['last_seen'])
-        if now - last_seen < timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-            fresh_sessions.append(session)
+        if not isinstance(session, dict) or 'last_seen' not in session or 'token' not in session:
+            print(f"WARNING: Malformed session entry for {license_obj.key}. Skipping.")
+            continue # Skip malformed session
+        try:
+            last_seen = datetime.fromisoformat(session['last_seen'])
+            if now - last_seen < timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+                fresh_sessions.append(session)
+        except ValueError:
+            print(f"WARNING: Invalid 'last_seen' datetime format for {license_obj.key}. Skipping session.")
+            continue # Skip session with invalid datetime format
             
     return fresh_sessions
 
@@ -295,7 +311,7 @@ def stripe_webhook():
 
     return jsonify(success=True), 200
 
-# --- Existing /verify-license and /heartbeat endpoints (unchanged logic) ---
+# --- Existing /verify-license and /heartbeat endpoints ---
 @app.route('/verify-license', methods=['POST'])
 def verify_license_main():
     data = request.get_json()
@@ -318,7 +334,12 @@ def verify_license_main():
     if license_obj.stripe_payment_status == 'PENDING':
          return jsonify({'isValid': False, 'message': 'License Key นี้ยังอยู่ระหว่างรอการชำระเงิน'}), 403
 
-    active_sessions = get_active_sessions(license_obj)
+    try: # Added try-except block here for get_active_sessions
+        active_sessions = get_active_sessions(license_obj)
+    except Exception as e:
+        print(f"Error getting active sessions for {license_key}: {e}")
+        # Consider logging the full traceback here for debugging
+        return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาดในการประมวลผลเซสชัน กรุณาลองใหม่'}), 500
     
     if len(active_sessions) >= license_obj.max_sessions:
         print(f"[SESSION_FULL] Key: {license_key} ใช้งานครบจำนวนเครื่องแล้ว ({len(active_sessions)}/{license_obj.max_sessions})")
@@ -356,21 +377,28 @@ def heartbeat():
     if not license_obj:
         return jsonify({'status': 'invalid_session'}), 403
 
-    active_sessions = json.loads(license_obj.active_sessions)
-    session_found = False
-    
-    for session in active_sessions:
-        if session['token'] == session_token:
-            session['last_seen'] = datetime.utcnow().isoformat()
-            session_found = True
-            break
-            
-    if session_found:
-        license_obj.active_sessions = json.dumps(active_sessions)
-        db.session.commit()
-        return jsonify({'status': 'ok'}), 200
-    else:
-        return jsonify({'status': 'invalid_session'}), 403
+    # Added error handling around get_active_sessions and json.dumps
+    try:
+        active_sessions = get_active_sessions(license_obj)
+        session_found = False
+        
+        for session in active_sessions:
+            if session['token'] == session_token:
+                session['last_seen'] = datetime.utcnow().isoformat()
+                session_found = True
+                break
+                
+        if session_found:
+            license_obj.active_sessions = json.dumps(active_sessions)
+            db.session.commit()
+            return jsonify({'status': 'ok'}), 200
+        else:
+            return jsonify({'status': 'invalid_session'}), 403
+    except Exception as e:
+        print(f"Error processing heartbeat for {license_key}: {e}")
+        # Consider logging the full traceback here for debugging
+        return jsonify({'status': 'internal_error', 'message': 'เกิดข้อผิดพลาดภายในในการประมวลผล Heartbeat'}), 500
+
 
 # --- 6. Run Application ---
 if __name__ == '__main__':
