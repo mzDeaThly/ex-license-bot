@@ -18,7 +18,7 @@ CORS(app)
 # --- Stripe API Settings ---
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
-YOUR_DOMAIN = os.environ.get('YOUR_DOMAIN')
+YOUR_DOMAIN = os.environ.get('https://ex-license-bot.onrender.com')
 
 # Ensure YOUR_DOMAIN is set for success/cancel URLs
 if not YOUR_DOMAIN:
