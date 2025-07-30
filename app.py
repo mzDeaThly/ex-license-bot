@@ -8,15 +8,15 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
-import stripe  # เปลี่ยนมาใช้ Stripe
+import omise # กลับมาใช้ Omise
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app)
 
-# --- Stripe API Key Setup from Environment Variables ---
-stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
-STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET') # สำหรับตรวจสอบ Webhook
+# --- Omise API Key Setup from Environment Variables ---
+omise.api_version = '2019-05-29'
+omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
 
 # --- Database Setup (เหมือนเดิม) ---
 DISK_STORAGE_PATH = '/var/data'
@@ -28,13 +28,6 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default-secret-key-for-local-dev')
 
 db = SQLAlchemy(app)
-
-# ใน app.py
-
-@app.route('/payment')
-def payment_page():
-    # ส่งไฟล์ payment.html ที่เราเพิ่งสร้าง
-    return app.send_static_file('pay.html')
 
 # --- 2. Database Model (เหมือนเดิม) ---
 class License(db.Model):
@@ -50,6 +43,7 @@ class License(db.Model):
         return f'<License {self.key}>'
 
 # --- 3 & 4. Admin Panel (เหมือนเดิม) ---
+# ... (ส่วนของ Admin Panel ไม่มีการเปลี่ยนแปลง) ...
 def check_auth(username, password):
     admin_user = os.environ.get('ADMIN_USERNAME')
     admin_pass = os.environ.get('ADMIN_PASSWORD')
@@ -81,7 +75,7 @@ admin.add_view(ProtectedModelView(License, db.session))
 with app.app_context():
     db.create_all()
 
-# --- 5. API Endpoints (ปรับปรุงใหม่) ---
+# --- 5. API Endpoints (กลับมาเป็นเวอร์ชัน Omise) ---
 TIER_CONFIG = {
     'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1},
     'basic3': {'price_satang': 180000, 'duration_days': 90, 'max_sessions': 3},
@@ -91,10 +85,10 @@ TIER_CONFIG = {
 
 @app.route('/')
 def index():
-    return app.send_static_file('index.html')
+    return "API Server is running."
 
-@app.route('/create-payment-intent', methods=['POST'])
-def create_payment_intent():
+@app.route('/create-charge-with-tier', methods=['POST'])
+def create_charge_with_tier():
     try:
         data = request.get_json()
         email = data.get('email')
@@ -102,64 +96,90 @@ def create_payment_intent():
         tier = data.get('tier')
 
         if not all([email, user_key, tier]) or tier not in TIER_CONFIG:
-            return jsonify(error={'message': 'Missing or invalid information'}), 400
+            return jsonify({'message': 'Missing or invalid information'}), 400
 
         if License.query.filter_by(key=user_key).first():
-            return jsonify(error={'message': 'This License Key is already in use.'}), 409
+            return jsonify({'message': 'This License Key is already in use.'}), 409
 
         tier_info = TIER_CONFIG[tier]
         amount = tier_info['price_satang']
 
-        payment_intent = stripe.PaymentIntent.create(
+        charge = omise.Charge.create(
             amount=amount,
             currency='thb',
-            payment_method_types=['promptpay'],
+            source={'type': 'promptpay'},
             metadata={'email': email, 'requested_key': user_key, 'tier': tier}
         )
         
-        # บันทึก Payment Intent ID เพื่อใช้อ้างอิงใน Webhook
+        # เก็บ Charge ID ไว้เพื่อใช้อ้างอิง
         new_license = License(
             key=f"PENDING-{user_key}",
             expires_on=date.today(),
-            api_key=payment_intent.id, # ใช้อ้างอิงชั่วคราว
+            api_key=charge.id,
             tier='Pending',
             max_sessions=0
         )
         db.session.add(new_license)
         db.session.commit()
         
-        return jsonify({'clientSecret': payment_intent.client_secret})
+        return jsonify({
+            'chargeId': charge.id,
+            'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
+        })
+    except Exception as e:
+        return jsonify({'message': str(e)}), 500
+
+@app.route('/check-charge-status')
+def check_charge_status():
+    charge_id = request.args.get('charge_id')
+    if not charge_id:
+        return jsonify({'status': 'not_found', 'message': 'charge_id is required'}), 400
+
+    license_entry = License.query.filter_by(api_key=charge_id).first()
+    
+    if not license_entry:
+        return jsonify({'status': 'not_found'})
+        
+    # ตรวจสอบสถานะโดยตรงจาก Omise API เพื่อความแม่นยำ
+    try:
+        charge = omise.Charge.retrieve(charge_id)
+        if charge.paid:
+             # ถ้าจ่ายแล้วแต่ใน DB ยังเป็น Pending ให้ทำการอัปเดต
+            if license_entry.tier == 'Pending':
+                metadata = charge['metadata']
+                requested_key = metadata.get('requested_key')
+                tier = metadata.get('tier')
+                tier_info = TIER_CONFIG[tier]
+
+                license_entry.key = requested_key
+                license_entry.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
+                license_entry.api_key = "CAP-ECED32012CF8CDCBE211FC698950482F8EE7669B23512943594905547D2E60E1"
+                license_entry.tier = tier
+                license_entry.max_sessions = tier_info['max_sessions']
+                db.session.commit()
+            
+            return jsonify({'status': 'successful', 'license_key': license_entry.key})
+        else:
+            return jsonify({'status': 'pending'})
 
     except Exception as e:
-        return jsonify(error={'message': str(e)}), 500
+         return jsonify({'status': 'error', 'message': str(e)})
 
-@app.route('/stripe-webhook', methods=['POST'])
-def stripe_webhook():
-    payload = request.data
-    sig_header = request.headers.get('Stripe-Signature')
-    event = None
 
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError as e:
-        return 'Invalid payload', 400
-    except stripe.error.SignatureVerificationError as e:
-        return 'Invalid signature', 400
-
-    if event['type'] == 'payment_intent.succeeded':
-        payment_intent = event['data']['object']
-        
-        payment_intent_id = payment_intent['id']
-        metadata = payment_intent['metadata']
+@app.route('/omise-webhook', methods=['POST'])
+def omise_webhook():
+    event = request.get_json()
+    if event.get('key') == 'charge.complete' and event['data']['status'] == 'successful':
+        charge_data = event['data']
+        charge_id = charge_data['id']
+        metadata = charge_data['metadata']
         requested_key = metadata.get('requested_key')
         tier = metadata.get('tier')
 
         if not all([requested_key, tier]) or tier not in TIER_CONFIG:
             return jsonify({'status': 'error', 'message': 'Missing metadata'})
 
-        license_to_update = License.query.filter_by(api_key=payment_intent_id, tier='Pending').first()
+        license_to_update = License.query.filter_by(api_key=charge_id, tier='Pending').first()
         
         if license_to_update:
             tier_info = TIER_CONFIG[tier]
@@ -170,7 +190,7 @@ def stripe_webhook():
             license_to_update.max_sessions = tier_info['max_sessions']
             
             db.session.commit()
-            print(f"✅ Stripe Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
+            print(f"✅ Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
 
     return jsonify({'status': 'ok'})
 
