@@ -422,7 +422,7 @@ def handle_message(event):
                 "ban <key>\n"
                 "check\n"
                 "notify <key>\n"
-                "<key> << ให้พิมพ์ user license key ได้เลย ไม่ต้องมี <>"
+                "<key> << ให้พิมพ์ license"
             )
 
     # ส่งข้อความตอบกลับ (ใช้ reply_token ได้แค่ครั้งเดียว)
