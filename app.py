@@ -17,7 +17,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # --- API Key Setup from Environment Variables ---
 omise.api_version = '2019-05-29'
 omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
-# --- [เพิ่ม] ดึงค่า Capsolver API Key จาก Environment ---
 CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY') 
 
 # --- Database Setup ---
@@ -151,7 +150,6 @@ def check_charge_status():
 
                 license_entry.key = requested_key
                 license_entry.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-                # --- [แก้ไข] ใช้ค่าจาก Environment ---
                 license_entry.api_key = CAPSOLVER_API_KEY
                 license_entry.tier = tier
                 license_entry.max_sessions = tier_info['max_sessions']
@@ -182,7 +180,6 @@ def omise_webhook():
             tier_info = TIER_CONFIG[tier]
             license_to_update.key = requested_key
             license_to_update.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-            # --- [แก้ไข] ใช้ค่าจาก Environment ---
             license_to_update.api_key = CAPSOLVER_API_KEY
             license_to_update.tier = tier
             license_to_update.max_sessions = tier_info['max_sessions']
@@ -238,9 +235,11 @@ def verify_license():
         return jsonify({
             'isValid': True,
             'message': 'License ใช้งานได้',
-            'apiKey': license_entry.api_key, # ส่ง key ที่อ่านจาก DB ซึ่งตอนนี้มาจาก Environment
+            'apiKey': license_entry.api_key,
             'sessionToken': session_token,
-            'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d')
+            'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d'),
+            'activeSessionsCount': len(active_sessions),
+            'maxSessions': license_entry.max_sessions
         })
 
     except Exception as e:
