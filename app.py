@@ -12,7 +12,7 @@ import omise # กลับมาใช้ Omise
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- Omise API Key Setup from Environment Variables ---
 omise.api_version = '2019-05-29'
