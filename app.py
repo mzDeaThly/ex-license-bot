@@ -438,44 +438,6 @@ def handle_message(event):
     except Exception as e:
         print(f"🚨 [LINE BOT] ตอบกลับไม่ได้: {e}")
 
-@app.route('/session/login', methods=['POST'])
-def login_session():
-    key = request.form.get('key')
-    ip = request.remote_addr
-    hwid = request.form.get('hwid')  # optional
-
-    if not key:
-        return jsonify({'success': False, 'message': 'Missing key'}), 400
-
-    license_entry = LicenseKey.query.filter_by(key=key).first()
-    if not license_entry:
-        return jsonify({'success': False, 'message': 'Invalid license key'}), 401
-
-    active_sessions = Session.query.filter_by(license_key_id=license_entry.id).all()
-    max_sessions = license_entry.max_sessions or 1
-
-    if len(active_sessions) >= max_sessions:
-        # แจ้งเตือนซ้ำ
-        send_line_message(
-            f"🔐 License Key ซ้ำ!\n🔑 Key: {key}\n💻 Active Sessions: {len(active_sessions)} / Max: {max_sessions}\n📍IP: {ip}"
-        )
-        return jsonify({'success': False, 'message': 'Max sessions reached'}), 403
-
-    # สร้าง session ใหม่
-    session_id = str(uuid.uuid4())
-    new_session = Session(session_id=session_id, license_key_id=license_entry.id, ip_address=ip)
-    db.session.add(new_session)
-    db.session.commit()
-
-    # แจ้งเตือน login ปกติ
-    send_line_message(
-        f"✅ มีการ Login License Key\n🔑 Key: {key}\n💻 Active Sessions: {len(active_sessions)+1} / Max: {max_sessions}\n📍IP: {ip}"
-    )
-
-    return jsonify({'success': True, 'session_id': session_id})
-
-
-
 # --- 7. Scheduled Job for Clearing Sessions ---
 def clear_all_sessions():
     with app.app_context():
