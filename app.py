@@ -96,10 +96,10 @@ def create_charge_with_tier():
         tier = data.get('tier')
 
         if not all([email, user_key, tier]) or tier not in TIER_CONFIG:
-            return jsonify({'message': 'Missing or invalid information'}), 400
+            return jsonify({'message': 'ข้อมูลไม่ครบถ้วนหรือไม่ถูกต้อง'}), 400
 
         if License.query.filter_by(key=user_key).first():
-            return jsonify({'message': 'This License Key is already in use.'}), 409
+            return jsonify({'message': 'License Key นี้มีผู้ใช้งานแล้ว'}), 409
 
         tier_info = TIER_CONFIG[tier]
         amount = tier_info['price_satang']
@@ -125,18 +125,19 @@ def create_charge_with_tier():
             'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
         })
     except Exception as e:
+        # สำหรับ Omise Error, ข้อความมักจะเป็นภาษาอังกฤษ ซึ่งเข้าใจได้ง่าย
         return jsonify({'message': str(e)}), 500
 
 @app.route('/check-charge-status')
 def check_charge_status():
     charge_id = request.args.get('charge_id')
     if not charge_id:
-        return jsonify({'status': 'not_found', 'message': 'charge_id is required'}), 400
+        return jsonify({'status': 'ไม่พบข้อมูล', 'message': 'ไม่พบ charge_id'}), 400
         
     license_entry = License.query.filter_by(api_key=charge_id).first()
     
     if not license_entry:
-        return jsonify({'status': 'not_found'})
+        return jsonify({'status': 'ไม่พบข้อมูล'})
         
     try:
         charge = omise.Charge.retrieve(charge_id)
@@ -171,7 +172,7 @@ def omise_webhook():
         tier = metadata.get('tier')
 
         if not all([requested_key, tier]) or tier not in TIER_CONFIG:
-            return jsonify({'status': 'error', 'message': 'Missing metadata'})
+            return jsonify({'status': 'error', 'message': 'ข้อมูล Metadata ไม่ครบ'})
 
         license_to_update = License.query.filter_by(api_key=charge_id, tier='Pending').first()
         
@@ -184,7 +185,7 @@ def omise_webhook():
             license_to_update.max_sessions = tier_info['max_sessions']
             
             db.session.commit()
-            print(f"✅ Webhook: Payment successful! Activated '{tier}' license: {requested_key}")
+            print(f"✅ Webhook: ชำระเงินสำเร็จ! เปิดใช้งาน License '{tier}': {requested_key}")
 
     return jsonify({'status': 'ok'})
     
@@ -195,28 +196,28 @@ def verify_license():
         key = data.get('licenseKey')
 
         if not key:
-            return jsonify({'isValid': False, 'message': 'License Key is required.'}), 400
+            return jsonify({'isValid': False, 'message': 'กรุณากรอก License Key'}), 400
 
         license_entry = License.query.filter_by(key=key).first()
 
         if not license_entry or license_entry.tier == 'Pending':
-            return jsonify({'isValid': False, 'message': 'License Key not found or inactive.'}), 404
+            return jsonify({'isValid': False, 'message': 'ไม่พบ License Key หรือยังไม่เปิดใช้งาน'}), 404
 
         if license_entry.expires_on < date.today():
-            return jsonify({'isValid': False, 'message': 'This license has expired.'}), 403
+            return jsonify({'isValid': False, 'message': 'License นี้หมดอายุแล้ว'}), 403
             
         session_token = uuid.uuid4().hex
         
         return jsonify({
             'isValid': True,
-            'message': 'License is valid.',
+            'message': 'License ใช้งานได้',
             'apiKey': license_entry.api_key,
             'sessionToken': session_token,
             'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d')
         })
 
     except Exception as e:
-        return jsonify({'isValid': False, 'message': f'An server error occurred: {str(e)}'}), 500
+        return jsonify({'isValid': False, 'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
@@ -226,22 +227,22 @@ def heartbeat():
         session_token = data.get('sessionToken')
 
         if not key or not session_token:
-            return jsonify({'message': 'License key and session token are required.'}), 400
+            return jsonify({'message': 'ต้องการ License Key และ Session Token'}), 400
 
         license_entry = License.query.filter_by(key=key).first()
 
         if not license_entry:
-            return jsonify({'message': 'License not found.'}), 404
+            return jsonify({'message': 'ไม่พบ License'}), 404
         
         # NOTE: For a real-world scenario, you would implement a more robust
         # session check here against the `active_sessions` field.
         # For this version, we will always return a success status
         # to allow the extension's primary logic to function.
         
-        return jsonify({'status': 'ok', 'message': 'Session is active.'}), 200
+        return jsonify({'status': 'ok', 'message': 'Session ใช้งานได้'}), 200
 
     except Exception as e:
-        return jsonify({'message': f'An server error occurred: {str(e)}'}), 500
+        return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
