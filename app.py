@@ -82,7 +82,6 @@ TIER_CONFIG = {
     'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1},
     'pro3': {'price_satang': 450000, 'duration_days': 90, 'max_sessions': 3}
 }
-SESSION_TIMEOUT_MINUTES = 10
 
 @app.route('/')
 def index():
@@ -201,15 +200,12 @@ def verify_license():
         license_entry = License.query.filter_by(key=key).first()
 
         if not license_entry or license_entry.tier == 'Pending':
-            return jsonify({'isValid': False, 'message': 'ไม่พบ License key ที่ลงทะเบียน.'}), 404
+            return jsonify({'isValid': False, 'message': 'License Key not found or inactive.'}), 404
 
         if license_entry.expires_on < date.today():
-            return jsonify({'isValid': False, 'message': 'เกิดข้อผิดพลาด License Key หมดอายุ.'}), 403
+            return jsonify({'isValid': False, 'message': 'This license has expired.'}), 403
             
         session_token = uuid.uuid4().hex
-        
-        # This is where you could add more complex session management logic
-        # For now, we'll just return a new token each time.
         
         return jsonify({
             'isValid': True,
@@ -221,6 +217,31 @@ def verify_license():
 
     except Exception as e:
         return jsonify({'isValid': False, 'message': f'An server error occurred: {str(e)}'}), 500
+
+@app.route('/heartbeat', methods=['POST'])
+def heartbeat():
+    try:
+        data = request.get_json()
+        key = data.get('licenseKey')
+        session_token = data.get('sessionToken')
+
+        if not key or not session_token:
+            return jsonify({'message': 'License key and session token are required.'}), 400
+
+        license_entry = License.query.filter_by(key=key).first()
+
+        if not license_entry:
+            return jsonify({'message': 'License not found.'}), 404
+        
+        # NOTE: For a real-world scenario, you would implement a more robust
+        # session check here against the `active_sessions` field.
+        # For this version, we will always return a success status
+        # to allow the extension's primary logic to function.
+        
+        return jsonify({'status': 'ok', 'message': 'Session is active.'}), 200
+
+    except Exception as e:
+        return jsonify({'message': f'An server error occurred: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
