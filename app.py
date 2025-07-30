@@ -335,26 +335,37 @@ def heartbeat():
     except Exception as e:
         return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
-# --- 6. LINE Messaging API Webhook ---
+# --- [แก้ไข] 6. LINE Messaging API Webhook ---
 @app.route("/line-webhook", methods=['POST'])
 def line_webhook():
+    # --- เพิ่ม Print Statements เพื่อ Debug ---
+    print("\n--- [LINE WEBHOOK] ได้รับคำขอใหม่ ---")
+    
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
-
+    
+    print(f"[LINE WEBHOOK] Signature: {signature}")
+    print(f"[LINE WEBHOOK] Request body: {body}") # <-- บรรทัดสำคัญ
+    
     try:
         handler.handle(body, signature)
+        print("[LINE WEBHOOK] Handle สำเร็จ")
     except InvalidSignatureError:
-        app.logger.info("Invalid signature. Please check your channel secret.")
+        print("🚨 [LINE WEBHOOK] Invalid signature. โปรดตรวจสอบ Channel Secret ของคุณ")
         abort(400)
+    except Exception as e:
+        print(f"🚨 [LINE WEBHOOK] เกิดข้อผิดพลาดในการ Handle: {e}")
+        abort(500)
+        
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     text = event.message.text
     user_id = event.source.user_id
+    print(f"[LINE WEBHOOK] ข้อความจาก User ID '{user_id}': {text}")
 
-    # --- [แก้ไข] ระบบแบน: ตรวจสอบว่า user_id อยู่ในรายชื่อ Admin หรือไม่ ---
+    # --- ระบบแบน: ตรวจสอบว่า user_id อยู่ในรายชื่อ Admin หรือไม่ ---
     if user_id in LINE_ADMIN_USER_IDS and text.lower().startswith('ban '):
         parts = text.split(' ')
         if len(parts) == 2:
