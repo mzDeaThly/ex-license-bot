@@ -4,5 +4,5 @@ Flask-SQLAlchemy==3.1.1
 Flask-Admin==1.6.1
 WTForms==3.0.1
 gunicorn==22.0.0
-stripe
+omise==0.15.0
 setuptools==69.5.1
