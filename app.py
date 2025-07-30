@@ -125,7 +125,6 @@ def create_charge_with_tier():
             'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
         })
     except Exception as e:
-        # สำหรับ Omise Error, ข้อความมักจะเป็นภาษาอังกฤษ ซึ่งเข้าใจได้ง่าย
         return jsonify({'message': str(e)}), 500
 
 @app.route('/check-charge-status')
@@ -206,38 +205,42 @@ def verify_license():
         if license_entry.expires_on < date.today():
             return jsonify({'isValid': False, 'message': 'License นี้หมดอายุแล้ว'}), 403
             
-        # --- [เพิ่ม] Logic การสร้างและจัดการ Session ---
+        print(f"[DEBUG] ตรวจสอบ License: {key}")
+        print(f"[DEBUG] ค่า max_sessions ที่อ่านจาก DB: {license_entry.max_sessions} (ประเภท: {type(license_entry.max_sessions)})")
+
         session_token = uuid.uuid4().hex
         
-        # โหลดรายการ session ที่มีอยู่ (เป็น string json)
         try:
             active_sessions = json.loads(license_entry.active_sessions)
         except (json.JSONDecodeError, TypeError):
             active_sessions = []
 
-        # เพิ่ม session ใหม่เข้าไป
         active_sessions.append(session_token)
-
-        # ถ้าจำนวน session เกินกว่าที่แพ็กเกจกำหนด ให้ลบ session ที่เก่าที่สุดออก
-        while len(active_sessions) > license_entry.max_sessions:
-            active_sessions.pop(0)
         
-        # บันทึกกลับลงฐานข้อมูล (เป็น string json)
+        print(f"[DEBUG] จำนวน session ปัจจุบัน (ก่อนลบ): {len(active_sessions)}")
+        
+        max_sessions_int = int(license_entry.max_sessions or 1)
+
+        while len(active_sessions) > max_sessions_int:
+            removed_session = active_sessions.pop(0)
+            print(f"[DEBUG] Session เกินกำหนด! ลบ session เก่า: {removed_session}")
+        
         license_entry.active_sessions = json.dumps(active_sessions)
         db.session.commit()
         
-        print(f"✅ สร้าง Session ใหม่สำหรับ License '{key}': {session_token}")
-        # --- จบส่วนที่เพิ่ม ---
+        print(f"[DEBUG] สร้าง Session ใหม่: {session_token}")
+        print(f"[DEBUG] รายการ Session ที่ใช้งานได้: {license_entry.active_sessions}")
         
         return jsonify({
             'isValid': True,
             'message': 'License ใช้งานได้',
             'apiKey': license_entry.api_key,
-            'sessionToken': session_token, # ส่ง token ใหม่กลับไป
+            'sessionToken': session_token,
             'expiresOn': license_entry.expires_on.strftime('%Y-%m-%d')
         })
 
     except Exception as e:
+        print(f"[ERROR] เกิดข้อผิดพลาดใน /verify-license: {str(e)}")
         return jsonify({'isValid': False, 'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
 @app.route('/heartbeat', methods=['POST'])
@@ -255,23 +258,21 @@ def heartbeat():
         if not license_entry:
             return jsonify({'message': 'ไม่พบ License'}), 404
         
-        # --- [เพิ่ม] Logic การตรวจสอบ Session ---
         try:
             active_sessions = json.loads(license_entry.active_sessions)
         except (json.JSONDecodeError, TypeError):
             active_sessions = []
         
-        # ตรวจสอบว่า session token ที่ส่งมายังอยู่ในรายการที่ได้รับอนุญาตหรือไม่
         if session_token not in active_sessions:
-            print(f"🚨 Session ไม่ถูกต้องสำหรับ License '{key}'. อาจมีการใช้งานจากเครื่องอื่น")
-            return jsonify({'message': 'Invalid session. Please verify your license again.'}), 403 # ส่ง 403!
+            print(f"🚨 [HEARTBEAT] Session ไม่ถูกต้องสำหรับ License '{key}'. อาจมีการใช้งานจากเครื่องอื่น")
+            return jsonify({'message': 'Session ไม่ถูกต้อง อาจมีการใช้งานจากเครื่องอื่น'}), 403
         
-        print(f"❤️ Heartbeat สำเร็จสำหรับ License '{key}'")
-        # --- จบส่วนที่เพิ่ม ---
+        print(f"❤️ [HEARTBEAT] สำเร็จสำหรับ License '{key}'")
         
         return jsonify({'status': 'ok', 'message': 'Session ใช้งานได้'}), 200
 
     except Exception as e:
+        print(f"[ERROR] เกิดข้อผิดพลาดใน /heartbeat: {str(e)}")
         return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
 if __name__ == '__main__':
