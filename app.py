@@ -335,21 +335,15 @@ def heartbeat():
     except Exception as e:
         return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
-# --- [แก้ไข] 6. LINE Messaging API Webhook ---
+# --- 6. LINE Messaging API Webhook ---
 @app.route("/line-webhook", methods=['POST'])
 def line_webhook():
-    # --- เพิ่ม Print Statements เพื่อ Debug ---
-    print("\n--- [LINE WEBHOOK] ได้รับคำขอใหม่ ---")
-    
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    
-    print(f"[LINE WEBHOOK] Signature: {signature}")
-    print(f"[LINE WEBHOOK] Request body: {body}") # <-- บรรทัดสำคัญ
-    
+    print(f"[LINE WEBHOOK] Request body: {body}")
+
     try:
         handler.handle(body, signature)
-        print("[LINE WEBHOOK] Handle สำเร็จ")
     except InvalidSignatureError:
         print("🚨 [LINE WEBHOOK] Invalid signature. โปรดตรวจสอบ Channel Secret ของคุณ")
         abort(400)
@@ -361,35 +355,83 @@ def line_webhook():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    text = event.message.text
+    text = event.message.text.lower().strip()
     user_id = event.source.user_id
-    print(f"[LINE WEBHOOK] ข้อความจาก User ID '{user_id}': {text}")
+    reply_token = event.reply_token
 
-    # --- ระบบแบน: ตรวจสอบว่า user_id อยู่ในรายชื่อ Admin หรือไม่ ---
-    if user_id in LINE_ADMIN_USER_IDS and text.lower().startswith('ban '):
-        parts = text.split(' ')
-        if len(parts) == 2:
-            key_to_ban = parts[1]
-            license_to_ban = License.query.filter_by(key=key_to_ban).first()
-            
-            reply_text = ""
-            if license_to_ban:
-                license_to_ban.expires_on = date.today() - timedelta(days=1)
-                license_to_ban.active_sessions = '[]'
-                db.session.commit()
-                reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
-                print(f"🚫 [LINE COMMAND] แบน License '{key_to_ban}' โดย Admin ({user_id})")
+    # ตรวจสอบก่อนว่าผู้ส่งเป็น Admin หรือไม่
+    if user_id not in LINE_ADMIN_USER_IDS:
+        return # ไม่ใช่ Admin, ไม่ต้องทำอะไร
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        reply_text = ""
+
+        # --- [แก้ไข] เพิ่มการจัดการคำสั่งหลายรูปแบบ ---
+        if text.startswith('ban '):
+            parts = text.split(' ')
+            if len(parts) == 2:
+                key_to_ban = parts[1]
+                license_to_ban = License.query.filter_by(key=key_to_ban).first()
+                if license_to_ban:
+                    license_to_ban.expires_on = date.today() - timedelta(days=1)
+                    license_to_ban.active_sessions = '[]'
+                    db.session.commit()
+                    reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
+                else:
+                    reply_text = f"ไม่พบ License Key '{key_to_ban}'"
             else:
-                reply_text = f"ไม่พบ License Key '{key_to_ban}' ในระบบ"
+                reply_text = "รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: ban KEY-123"
+
+        elif text == 'check':
+            active_licenses = License.query.filter(License.expires_on >= date.today()).all()
+            count = len(active_licenses)
             
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply_text)]
+            if count == 0:
+                reply_text = "ℹ️ ไม่มี License Key ที่ใช้งานได้ในขณะนี้"
+            else:
+                details = []
+                for lic in active_licenses:
+                    details.append(f"- {lic.key} ({lic.max_sessions} sessions)")
+                
+                details_text = "\n".join(details)
+                reply_text = f"📊 License ที่ใช้งานได้: {count} รายการ\n\n{details_text}"
+            
+        elif text.startswith('notify '):
+            parts = text.split(' ')
+            if len(parts) == 2:
+                key_to_notify = parts[1]
+                license_to_notify = License.query.filter_by(key=key_to_notify).first()
+
+                if license_to_notify:
+                    # สร้างข้อความสถานะ
+                    status_message = (
+                        f"🔔 แจ้งเตือนสถานะ License\n"
+                        f"Key: {license_to_notify.key}\n"
+                        f"Max Sessions: {license_to_notify.max_sessions}\n"
+                        f"หมดอายุ: {license_to_notify.expires_on.strftime('%Y-%m-%d')}"
                     )
+                    # ส่งแจ้งเตือนไปหา Admin ทุกคน
+                    send_line_message(status_message)
+                    # ตอบกลับหาคนที่ส่งคำสั่ง
+                    reply_text = f"✅ ส่งการแจ้งเตือนสำหรับ '{key_to_notify}' เรียบร้อย"
+                else:
+                    reply_text = f"ไม่พบ License Key '{key_to_notify}'"
+            else:
+                reply_text = "รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: notify KEY-123"
+        
+        else:
+            # ถ้าไม่ตรงกับคำสั่งใดๆ อาจจะส่งข้อความช่วยเหลือ
+            reply_text = "คำสั่งที่ไม่รู้จัก\nคำสั่งที่ใช้ได้:\n- ban <key>\n- check\n- notify <key>"
+
+        # ส่งข้อความตอบกลับถ้ามี
+        if reply_text:
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(text=reply_text)]
                 )
+            )
 
 # --- 7. Scheduled Job for Clearing Sessions ---
 def clear_all_sessions():
