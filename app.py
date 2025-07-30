@@ -29,6 +29,13 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default-secret-key-for-
 
 db = SQLAlchemy(app)
 
+# ใน app.py
+
+@app.route('/payment')
+def payment_page():
+    # ส่งไฟล์ payment.html ที่เราเพิ่งสร้าง
+    return app.send_static_file('pay.html')
+
 # --- 2. Database Model (เหมือนเดิม) ---
 class License(db.Model):
     id = db.Column(db.Integer, primary_key=True)
