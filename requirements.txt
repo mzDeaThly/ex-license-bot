@@ -1,12 +1,11 @@
 Flask
 Flask-Cors
 Flask-SQLAlchemy
-Flask-Admin
+Flask-Admin==1.6.0
+WTForms==3.0.1
 APScheduler
 line-bot-sdk
 promptpay==1.1.9
 qrcode
 Pillow
 gunicorn
-
-
