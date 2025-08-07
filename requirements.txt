@@ -7,3 +7,4 @@ line-bot-sdk
 promptpay
 qrcode
 Pillow
+gunicorn
