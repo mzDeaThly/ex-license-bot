@@ -5,8 +5,9 @@ Flask-Admin==1.6.1
 WTForms==3.0.1
 APScheduler
 line-bot-sdk
-promptpay==1.1.9
+promptpay==1.1.8
 qrcode
 Pillow
 gunicorn==22.0.0
+
 
