@@ -59,8 +59,9 @@ class License(db.Model):
     active_sessions = db.Column(db.Text, default='[]')
     status = db.Column(db.String(20), default='pending', nullable=False)
 
+
 def __repr__(self):
-    # แสดง id และ key ถ้า object ถูกบันทึกแล้ว, ถ้ายังไม่ถูกบันทึกให้แสดง (new)
+   
     if self.id:
         return f'<License id={self.id} key="{self.key}">'
     else:
@@ -335,6 +336,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
