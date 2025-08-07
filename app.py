@@ -20,6 +20,52 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
+# --- [เพิ่ม] ฟังก์ชันสำหรับสร้าง PromptPay Payload ด้วยตนเอง ---
+def generate_promptpay_payload(account_id, amount=None):
+    """Generates a PromptPay payload string without external libraries."""
+    
+    def crc16(data: bytes) -> int:
+        crc = 0xFFFF
+        for b in data:
+            crc ^= b
+            for _ in range(8):
+                if crc & 1:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
+        return crc
+
+    target = account_id.replace('-', '')
+    
+    # Payload ID and Type
+    payload = "000201" # Payload Format Indicator
+    payload += "010212" # Point of Initiation Method (11 for static, 12 for dynamic)
+
+    # Merchant Information
+    if len(target) > 13: # e-Wallet ID
+        merchant_info = f"0216{target}"
+    elif len(target) == 13: # National ID
+        merchant_info = f"0113{target}"
+    else: # Phone Number
+        target = '0066' + target[1:]
+        merchant_info = f"0013{target}"
+
+    payload += f"29{len(merchant_info):02}{merchant_info}"
+
+    # Country, Currency, Amount
+    payload += "5802TH" # Country Code
+    payload += "5303764" # Currency Code
+
+    if amount:
+        amount_str = f"{amount:.2f}"
+        payload += f"54{len(amount_str):02}{amount_str}"
+
+    # Checksum
+    payload_for_crc = payload + "6304"
+    checksum = crc16(payload_for_crc.encode('ascii'))
+    
+    return f"{payload_for_crc}{checksum:04X}"
+
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -142,7 +188,7 @@ def create_charge_with_tier():
         tier_info = TIER_CONFIG[tier]
         amount_thb = tier_info['price_satang'] / 100.0
 
-        payload = promptpay.generate_payload(PROMPTPAY_ID, amount=amount_thb)
+        payload = generate_promptpay_payload(PROMPTPAY_ID, amount=amount_thb)
         img = qrcode.make(payload)
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
@@ -336,6 +382,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
