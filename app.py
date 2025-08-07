@@ -114,10 +114,10 @@ def send_line_message(message_text):
 
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
-    'basic': {'price_satang': 120000, 'duration_days': 30, 'max_sessions': 1},
-    'basic3': {'price_satang': 180000, 'duration_days': 90, 'max_sessions': 3},
-    'pro': {'price_satang': 250000, 'duration_days': 30, 'max_sessions': 1},
-    'pro3': {'price_satang': 450000, 'duration_days': 90, 'max_sessions': 3}
+    'basic': {'price_satang': 30000, 'duration_days': 30, 'max_sessions': 1},
+    'basic3': {'price_satang': 65000, 'duration_days': 30, 'max_sessions': 3},
+    'pro': {'price_satang': 75000, 'duration_days': 90, 'max_sessions': 1},
+    'pro3': {'price_satang': 150000, 'duration_days': 90, 'max_sessions': 3}
 }
 
 @app.route('/')
@@ -335,6 +335,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
