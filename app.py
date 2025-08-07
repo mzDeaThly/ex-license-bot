@@ -137,7 +137,7 @@ def create_charge_with_tier():
         tier_info = TIER_CONFIG[tier]
         amount_thb = tier_info['price_satang'] / 100.0
 
-        payload = promptpay.generate_payload(PROMPTPAY_ID, amount=amount_thb)
+        payload = promptpay.payload(PROMPTPAY_ID, amount=amount_thb)
         img = qrcode.make(payload)
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
@@ -331,3 +331,4 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
