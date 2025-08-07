@@ -4,8 +4,9 @@ Flask-SQLAlchemy
 Flask-Admin
 APScheduler
 line-bot-sdk
-promptpay==0.1.2
+promptpay==1.1.9
 qrcode
 Pillow
 gunicorn
+
 
