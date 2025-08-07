@@ -60,7 +60,11 @@ class License(db.Model):
     status = db.Column(db.String(20), default='pending', nullable=False)
 
     def __repr__(self):
-        return f'<License {self.key}>'
+    # แสดง id และ key ถ้า object ถูกบันทึกแล้ว, ถ้ายังไม่ถูกบันทึกให้แสดง (new)
+    if self.id:
+        return f'<License id={self.id} key="{self.key}">'
+    else:
+        return '<License (new)>'
 
 # --- 3. & 4. Admin Panel ---
 def check_auth(username, password):
@@ -331,4 +335,5 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
