@@ -2,52 +2,37 @@ import os
 import json
 import uuid
 from datetime import datetime, date, timedelta
-
+import promptpay
+import qrcode
+import io
+import base64
 from flask import Flask, request, jsonify, Response, abort
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
-import omise
 from apscheduler.schedulers.background import BackgroundScheduler
-
-# --- [เพิ่ม] LINE SDK Imports ---
-from linebot.v3 import (
-    WebhookHandler
-)
-from linebot.v3.exceptions import (
-    InvalidSignatureError
-)
+from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    ReplyMessageRequest,
-    PushMessageRequest,
-    TextMessage,
-    MulticastRequest
+    Configuration, ApiClient, MessagingApi, ReplyMessageRequest,
+    PushMessageRequest, TextMessage, MulticastRequest
 )
-from linebot.v3.webhooks import (
-    MessageEvent,
-    TextMessageContent
-)
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- API Key Setup from Environment Variables ---
-omise.api_version = '2019-05-29'
-omise.secret_key = os.environ.get('OMISE_SECRET_KEY')
-CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY') 
+# --- API Key Setup ---
+CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY')
+PROMPTPAY_ID = os.environ.get('PROMPTPAY_ID')
 
-# --- [แก้ไข] LINE Bot Setup for Multiple Admins ---
+# --- LINE Bot Setup ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-# อ่านค่า Admin ID ทั้งหมดแล้วแยกด้วยจุลภาค (,)
 LINE_ADMIN_USER_IDS_STR = os.environ.get('LINE_ADMIN_USER_ID', '')
 LINE_ADMIN_USER_IDS = [uid.strip() for uid in LINE_ADMIN_USER_IDS_STR.split(',') if uid.strip()]
-
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -69,14 +54,15 @@ class License(db.Model):
     key = db.Column(db.String(80), unique=True, nullable=False)
     expires_on = db.Column(db.Date, nullable=False)
     api_key = db.Column(db.String(120), nullable=False)
-    tier = db.Column(db.String(50), default='Basic')
+    tier = db.Column(db.String(50), nullable=False)
     max_sessions = db.Column(db.Integer, default=1)
     active_sessions = db.Column(db.Text, default='[]')
+    status = db.Column(db.String(20), default='pending', nullable=False)
 
     def __repr__(self):
         return f'<License {self.key}>'
 
-# --- 3. Admin Panel Protection ---
+# --- 3. & 4. Admin Panel ---
 def check_auth(username, password):
     admin_user = os.environ.get('ADMIN_USERNAME')
     admin_pass = os.environ.get('ADMIN_PASSWORD')
@@ -102,32 +88,25 @@ class ProtectedModelView(ModelView):
     def inaccessible_callback(self, name, **kwargs):
         return authenticate()
 
-# --- 4. Admin Panel Creation ---
 admin = Admin(app, name='License Manager', template_mode='bootstrap4', index_view=ProtectedAdminIndexView())
 admin.add_view(ProtectedModelView(License, db.session))
 
 with app.app_context():
     db.create_all()
 
-# --- [แก้ไข] Helper Function for Sending LINE Message to all Admins ---
+# --- Helper Function for LINE Message ---
 def send_line_message(message_text):
     if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_ADMIN_USER_IDS]):
-        print("🚨 [LINE] ไม่สามารถส่งข้อความได้: กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_ADMIN_USER_ID")
+        print("🚨 [LINE] Missing LINE config")
         return
-
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # ใช้ Multicast เพื่อส่งหา Admin ทุกคนในครั้งเดียว
             line_bot_api.multicast(
-                MulticastRequest(
-                    to=LINE_ADMIN_USER_IDS,
-                    messages=[TextMessage(text=message_text)]
-                )
+                MulticastRequest(to=LINE_ADMIN_USER_IDS, messages=[TextMessage(text=message_text)])
             )
-        print(f"✅ [LINE] ส่งข้อความแจ้งเตือนไปยัง Admin {len(LINE_ADMIN_USER_IDS)} คนสำเร็จ")
     except Exception as e:
-        print(f"🚨 [LINE] เกิดข้อผิดพลาดในการส่งข้อความ: {e}")
+        print(f"🚨 [LINE] Error sending message: {e}")
 
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
@@ -143,157 +122,90 @@ def index():
 
 @app.route('/create-charge-with-tier', methods=['POST'])
 def create_charge_with_tier():
+    if not PROMPTPAY_ID:
+        return jsonify({'message': 'ผู้ดูแลระบบยังไม่ได้ตั้งค่า PromptPay ID'}), 500
     try:
         data = request.get_json()
-        email = data.get('email')
-        user_key = data.get('licenseKey')
-        tier = data.get('tier')
+        email, user_key, tier = data.get('email'), data.get('licenseKey'), data.get('tier')
 
         if not all([email, user_key, tier]) or tier not in TIER_CONFIG:
             return jsonify({'message': 'ข้อมูลไม่ครบถ้วนหรือไม่ถูกต้อง'}), 400
 
         if License.query.filter_by(key=user_key).first():
-            return jsonify({'message': 'License Key นี้มีผู้ใช้งานแล้ว'}), 409
+             return jsonify({'message': 'License Key นี้มีอยู่ในระบบแล้ว'}), 409
 
         tier_info = TIER_CONFIG[tier]
-        amount = tier_info['price_satang']
+        amount_thb = tier_info['price_satang'] / 100.0
 
-        charge = omise.Charge.create(
-            amount=amount,
-            currency='thb',
-            source={'type': 'promptpay'},
-            metadata={'email': email, 'requested_key': user_key, 'tier': tier}
-        )
+        payload = promptpay.generate_payload(PROMPTPAY_ID, amount=amount_thb)
+        img = qrcode.make(payload)
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        qr_code_data_uri = f"data:image/png;base64,{img_str}"
+
+        pending_id = uuid.uuid4().hex
         new_license = License(
-            key=f"PENDING-{user_key}",
+            key=user_key,
             expires_on=date.today(),
-            api_key=charge.id,
-            tier='Pending',
+            api_key=pending_id,
+            tier=tier,
+            status='pending',
             max_sessions=0
         )
         db.session.add(new_license)
         db.session.commit()
-        
-        return jsonify({
-            'chargeId': charge.id,
-            'qrCodeUrl': charge.source['scannable_code']['image']['download_uri']
-        })
+
+        message_to_admin = (
+            f"⏳ มีรายการรอชำระเงินใหม่\n"
+            f"Key: {user_key}\n"
+            f"แพ็กเกจ: {tier}\n"
+            f"ยอดเงิน: {amount_thb} บาท\n\n"
+            f"ใช้คำสั่ง `activate {user_key}` เพื่อเปิดใช้งาน"
+        )
+        send_line_message(message_to_admin)
+
+        return jsonify({'chargeId': pending_id, 'qrCodeUrl': qr_code_data_uri})
     except Exception as e:
+        print(f"Error in create_charge_with_tier: {e}")
         return jsonify({'message': str(e)}), 500
 
 @app.route('/check-charge-status')
 def check_charge_status():
     charge_id = request.args.get('charge_id')
-    if not charge_id:
-        return jsonify({'status': 'ไม่พบข้อมูล', 'message': 'ไม่พบ charge_id'}), 400
-        
     license_entry = License.query.filter_by(api_key=charge_id).first()
-    
-    if not license_entry:
-        return jsonify({'status': 'ไม่พบข้อมูล'})
-        
-    try:
-        charge = omise.Charge.retrieve(charge_id)
-        if charge.paid:
-            if license_entry.tier == 'Pending':
-                metadata = charge['metadata']
-                requested_key = metadata.get('requested_key')
-                tier = metadata.get('tier')
-                tier_info = TIER_CONFIG[tier]
+    if not license_entry: return jsonify({'status': 'error', 'message': 'ไม่พบรายการ'})
+    if license_entry.status == 'active': return jsonify({'status': 'successful', 'license_key': license_entry.key})
+    else: return jsonify({'status': 'pending', 'message': 'รอการยืนยัน'})
 
-                license_entry.key = requested_key
-                license_entry.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-                license_entry.api_key = CAPSOLVER_API_KEY
-                license_entry.tier = tier
-                license_entry.max_sessions = tier_info['max_sessions']
-                db.session.commit()
-
-                message = (
-                    f"🎉 มี License ใหม่!\n"
-                    f"Key: {license_entry.key}\n"
-                    f"Max Sessions: {license_entry.max_sessions}\n"
-                    f"หมดอายุ: {license_entry.expires_on.strftime('%Y-%m-%d')}"
-                )
-                send_line_message(message)
-            
-            return jsonify({'status': 'successful', 'license_key': license_entry.key})
-        else:
-            return jsonify({'status': 'pending'})
-    except Exception as e:
-         return jsonify({'status': 'error', 'message': str(e)})
-
-@app.route('/omise-webhook', methods=['POST'])
-def omise_webhook():
-    event = request.get_json()
-    if event.get('key') == 'charge.complete' and event['data']['status'] == 'successful':
-        charge_data = event['data']
-        charge_id = charge_data['id']
-        metadata = charge_data['metadata']
-        requested_key = metadata.get('requested_key')
-        tier = metadata.get('tier')
-
-        if not all([requested_key, tier]) or tier not in TIER_CONFIG:
-            return jsonify({'status': 'error', 'message': 'ข้อมูล Metadata ไม่ครบ'})
-
-        license_to_update = License.query.filter_by(api_key=charge_id, tier='Pending').first()
-        
-        if license_to_update:
-            tier_info = TIER_CONFIG[tier]
-            license_to_update.key = requested_key
-            license_to_update.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-            license_to_update.api_key = CAPSOLVER_API_KEY
-            license_to_update.tier = tier
-            license_to_update.max_sessions = tier_info['max_sessions']
-            
-            db.session.commit()
-            print(f"✅ Webhook: ชำระเงินสำเร็จ! เปิดใช้งาน License '{tier}': {requested_key}")
-
-            message = (
-                f"🎉 มี License ใหม่! (Webhook)\n"
-                f"Key: {license_to_update.key}\n"
-                f"Max Sessions: {license_to_update.max_sessions}\n"
-                f"หมดอายุ: {license_to_update.expires_on.strftime('%Y-%m-%d')}"
-            )
-            send_line_message(message)
-
-    return jsonify({'status': 'ok'})
-    
 @app.route('/verify-license', methods=['POST'])
 def verify_license():
     try:
         data = request.get_json()
         key = data.get('licenseKey')
-
-        if not key:
-            return jsonify({'isValid': False, 'message': 'กรุณากรอก License Key'}), 400
+        if not key: return jsonify({'isValid': False, 'message': 'กรุณากรอก License Key'}), 400
 
         license_entry = License.query.filter_by(key=key).first()
 
-        if not license_entry or license_entry.tier == 'Pending':
+        if not license_entry or license_entry.status == 'pending':
             return jsonify({'isValid': False, 'message': 'ไม่พบ License Key หรือยังไม่เปิดใช้งาน'}), 404
-
         if license_entry.expires_on < date.today():
             return jsonify({'isValid': False, 'message': 'License นี้หมดอายุแล้ว'}), 403
-            
+
         session_token = uuid.uuid4().hex
-        
         try:
             active_sessions = json.loads(license_entry.active_sessions)
         except (json.JSONDecodeError, TypeError):
             active_sessions = []
-
         active_sessions.append(session_token)
-        
         max_sessions_int = int(license_entry.max_sessions or 1)
-
-        while len(active_sessions) > max_sessions_int:
+        if len(active_sessions) > max_sessions_int:
             active_sessions.pop(0)
-            message = f"⚠️ Session เกินกำหนด!\nKey: {license_entry.key}\nมีการพยายามเข้าสู่ระบบครั้งใหม่ ทำให้ Session เก่าถูกตัดการเชื่อมต่อ"
-            send_line_message(message)
-        
+            send_line_message(f"⚠️ Session เกินกำหนด!\nKey: {license_entry.key}\nมีการเข้าสู่ระบบใหม่ ทำให้ Session เก่าถูกตัด")
+
         license_entry.active_sessions = json.dumps(active_sessions)
         db.session.commit()
-        
+
         return jsonify({
             'isValid': True,
             'message': 'License ใช้งานได้',
@@ -303,142 +215,106 @@ def verify_license():
             'activeSessionsCount': len(active_sessions),
             'maxSessions': license_entry.max_sessions
         })
-
     except Exception as e:
         return jsonify({'isValid': False, 'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
 
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
-    try:
-        data = request.get_json()
-        key = data.get('licenseKey')
-        session_token = data.get('sessionToken')
+    return jsonify({'status': 'ok'}), 200
 
-        if not key or not session_token:
-            return jsonify({'message': 'ต้องการ License Key และ Session Token'}), 400
-
-        license_entry = License.query.filter_by(key=key).first()
-
-        if not license_entry:
-            return jsonify({'message': 'ไม่พบ License'}), 404
-        
-        try:
-            active_sessions = json.loads(license_entry.active_sessions)
-        except (json.JSONDecodeError, TypeError):
-            active_sessions = []
-        
-        if session_token not in active_sessions:
-            return jsonify({'message': 'Session ไม่ถูกต้อง อาจมีการใช้งานจากเครื่องอื่น'}), 403
-        
-        return jsonify({'status': 'ok', 'message': 'Session ใช้งานได้'}), 200
-
-    except Exception as e:
-        return jsonify({'message': f'เกิดข้อผิดพลาดบนเซิร์ฟเวอร์: {str(e)}'}), 500
-
-# --- 6. LINE Messaging API Webhook ---
 @app.route("/line-webhook", methods=['POST'])
 def line_webhook():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    print(f"[LINE WEBHOOK] Request body: {body}")
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("🚨 [LINE WEBHOOK] Invalid signature. โปรดตรวจสอบ Channel Secret ของคุณ")
         abort(400)
     except Exception as e:
-        print(f"🚨 [LINE WEBHOOK] เกิดข้อผิดพลาดในการ Handle: {e}")
         abort(500)
-        
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    text = event.message.text.lower().strip()
+    text = event.message.text.strip()
     user_id = event.source.user_id
     reply_token = event.reply_token
 
+    parts = text.split(' ')
+    command = parts[0].lower()
+
+    admin_commands = ['activate', 'ban', 'check', 'notify']
     reply_text = ""
 
-    # ตรวจสอบก่อนว่าผู้ส่งเป็น Admin หรือไม่
-    if user_id not in LINE_ADMIN_USER_IDS:
-        reply_text = "⛔️ บัญชีนี้ไม่ได้รับสิทธิ์ใช้งานบอท\nกรุณาติดต่อผู้ดูแลระบบ"
+    if command in admin_commands:
+        if user_id not in LINE_ADMIN_USER_IDS:
+            reply_text = "⛔️ คุณไม่ได้รับสิทธิ์ในการใช้คำสั่งนี้"
+        else:
+            if command == 'activate' and len(parts) == 2:
+                key_to_activate = parts[1]
+                license_to_activate = License.query.filter_by(key=key_to_activate, status='pending').first()
+                if license_to_activate:
+                    tier = license_to_activate.tier
+                    tier_info = TIER_CONFIG[tier]
+                    license_to_activate.status = 'active'
+                    license_to_activate.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
+                    license_to_activate.max_sessions = tier_info['max_sessions']
+                    license_to_activate.api_key = CAPSOLVER_API_KEY
+                    db.session.commit()
 
-    else:
-        # เป็นแอดมิน → จัดการคำสั่ง
-        if text.startswith('ban '):
-            parts = text.split(' ')
-            if len(parts) == 2:
+                    activation_message = f"✅ เปิดใช้งาน License '{key_to_activate}' สำเร็จ!\n- Tier: {tier}"
+                    reply_text = activation_message
+                    send_line_message(activation_message)
+                else:
+                    reply_text = f"ไม่พบ License Key '{key_to_activate}' ที่รอการเปิดใช้งาน"
+
+            elif command == 'ban' and len(parts) == 2:
                 key_to_ban = parts[1]
                 license_to_ban = License.query.filter_by(key=key_to_ban).first()
                 if license_to_ban:
+                    license_to_ban.status = 'banned'
                     license_to_ban.expires_on = date.today() - timedelta(days=1)
-                    license_to_ban.active_sessions = '[]'
                     db.session.commit()
                     reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
                 else:
                     reply_text = f"ไม่พบ License Key '{key_to_ban}'"
-            else:
-                reply_text = "❗️รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: ban KEY-123"
 
-        elif text == 'check':
-            active_licenses = License.query.filter(License.expires_on >= date.today()).all()
-            count = len(active_licenses)
-            
-            if count == 0:
-                reply_text = "ℹ️ ไม่มี License Key ที่ใช้งานได้ในขณะนี้"
-            else:
-                details = []
-                for lic in active_licenses:
-                    details.append(f"- {lic.key} ({lic.max_sessions} sessions)")
-                
-                details_text = "\n".join(details)
-                reply_text = f"📊 License ที่ใช้งานได้: {count} รายการ\n\n{details_text}"
-
-        elif text.startswith('notify '):
-            parts = text.split(' ')
-            if len(parts) == 2:
+            elif command == 'notify' and len(parts) == 2:
                 key_to_notify = parts[1]
                 license_to_notify = License.query.filter_by(key=key_to_notify).first()
-
                 if license_to_notify:
                     status_message = (
-                        f"🔔 แจ้งเตือนสถานะ License\n"
+                        f"🔔 สถานะ License\n"
                         f"Key: {license_to_notify.key}\n"
+                        f"Tier: {license_to_notify.tier}\n"
+                        f"Status: {license_to_notify.status.capitalize()}\n"
                         f"Max Sessions: {license_to_notify.max_sessions}\n"
                         f"หมดอายุ: {license_to_notify.expires_on.strftime('%Y-%m-%d')}"
                     )
                     send_line_message(status_message)
-                    reply_text = f"✅ ส่งการแจ้งเตือนสำหรับ '{key_to_notify}' เรียบร้อย"
+                    reply_text = f"✅ ส่งข้อมูลของ '{key_to_notify}' ให้แอดมินทุกคนแล้ว"
                 else:
                     reply_text = f"ไม่พบ License Key '{key_to_notify}'"
+
+            elif command == 'check':
+                active_licenses = License.query.filter(License.status == 'active', License.expires_on >= date.today()).count()
+                pending_licenses = License.query.filter_by(status='pending').count()
+                reply_text = f"📊 สรุปสถานะ:\n- ใช้งานได้: {active_licenses} รายการ\n- รอเปิดใช้งาน: {pending_licenses} รายการ"
+
             else:
-                reply_text = "❗️รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: notify KEY-123"
+                reply_text = "รูปแบบคำสั่งแอดมินไม่ถูกต้อง"
 
-        else:
-            reply_text = (
-                "คำสั่งที่ใช้ได้:\n"
-                "ban <key>\n"
-                "check\n"
-                "notify <key>\n"
-                "<key> << ให้พิมพ์ license"
-            )
 
-    # ส่งข้อความตอบกลับ (ใช้ reply_token ได้แค่ครั้งเดียว)
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=[TextMessage(text=reply_text)]
+    if reply_text:
+        try:
+            with ApiClient(configuration) as api_client:
+                MessagingApi(api_client).reply_message(
+                    ReplyMessageRequest(reply_token=reply_token, messages=[TextMessage(text=reply_text)])
                 )
-            )
-    except Exception as e:
-        print(f"🚨 [LINE BOT] ตอบกลับไม่ได้: {e}")
+        except Exception as e:
+            print(f"🚨 [LINE BOT] ไม่สามารถตอบกลับได้: {e}")
 
-# --- 7. Scheduled Job for Clearing Sessions ---
+# --- 7. Scheduled Job ---
 def clear_all_sessions():
     with app.app_context():
         try:
