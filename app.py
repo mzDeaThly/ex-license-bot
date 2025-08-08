@@ -174,6 +174,21 @@ TIER_CONFIG = {
     'pro': {'price_satang': 75000, 'duration_days': 90, 'max_sessions': 1},
     'pro3': {'price_satang': 150000, 'duration_days': 90, 'max_sessions': 3}
 }
+# -- เช็ค version server -- #
+@app.route('/version')
+def get_version():
+    try:
+        # เปิดไฟล์ version.txt เพื่ออ่านค่า
+        with open('version.txt', 'r') as f:
+            version = f.read().strip()
+        # ส่งค่าเวอร์ชั่นกลับไปในรูปแบบ JSON
+        return jsonify({'version': version})
+    except FileNotFoundError:
+        # กรณีไม่พบไฟล์ version.txt
+        return jsonify({'message': 'ไม่พบไฟล์เวอร์ชั่นบนเซิร์ฟเวอร์'}), 404
+    except Exception as e:
+        # จัดการข้อผิดพลาดอื่นๆ ที่อาจเกิดขึ้น
+        return jsonify({'message': str(e)}), 500
 
 @app.route('/')
 def index():
@@ -418,3 +433,4 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
