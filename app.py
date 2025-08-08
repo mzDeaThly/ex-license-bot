@@ -20,55 +20,52 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# --- [แก้ไข] ฟังก์ชันสำหรับสร้าง PromptPay Payload ให้ถูกต้องตามมาตรฐาน ---
+# --- [แก้ไข] ฟังก์ชันสำหรับสร้าง PromptPay Payload เวอร์ชันสมบูรณ์ ---
 def generate_promptpay_payload(account_id, amount=None):
-    """Generates a standard-compliant PromptPay payload string."""
+    """Generates a standard-compliant PromptPay payload string with a corrected CRC16 checksum."""
 
-    def crc16(data: bytes) -> int:
+    def crc16_ccitt_false(data: bytes):
         crc = 0xFFFF
+        poly = 0x1021
         for b in data:
-            crc ^= b
+            crc ^= (b << 8)
             for _ in range(8):
-                if crc & 1:
-                    crc = (crc >> 1) ^ 0xA001
+                if crc & 0x8000:
+                    crc = (crc << 1) ^ poly
                 else:
-                    crc >>= 1
-        return crc
+                    crc <<= 1
+        return crc & 0xFFFF
 
-    target = account_id.replace('-', '')
+    target = account_id.replace('-', '').strip()
 
-    # Field 00: Payload Format Indicator
+    # Field 00, 01
     payload = "000201"
-    # Field 01: Point of Initiation Method (11 for static, 12 for dynamic)
     payload += "010212" if amount else "010211"
 
-    # Field 29: Merchant Account Information (for PromptPay)
-    # Sub-field 00: GUID for PromptPay
+    # Field 29
     merchant_guid = "0016A000000677010111"
-    # Sub-field 01: Biller ID (Phone or National ID)
     if len(target) == 13: # National ID
-         biller_id = f"0113{target}"
-    else: # Phone Number (formatted to 0066...)
+        biller_id = f"0113{target}"
+    else: # Phone Number
         biller_id = f"0113{'0066' + target[1:]}"
-
     merchant_info = f"{merchant_guid}{biller_id}"
     payload += f"29{len(merchant_info):02}{merchant_info}"
 
-    # Field 58: Country Code
+    # Field 58, 53
     payload += "5802TH"
-    # Field 53: Transaction Currency
     payload += "5303764"
 
-    # Field 54: Transaction Amount (optional)
+    # Field 54
     if amount:
         amount_str = f"{amount:.2f}"
         payload += f"54{len(amount_str):02}{amount_str}"
 
-    # Field 63: CRC Checksum
+    # Field 63: CRC
     payload_for_crc = payload + "6304"
-    checksum = crc16(payload_for_crc.encode('ascii'))
+    checksum = crc16_ccitt_false(payload_for_crc.encode('utf-8'))
 
     return f"{payload_for_crc}{checksum:04X}"
+
 
 # --- 1. Basic Setup ---
 app = Flask(__name__, static_folder='public', static_url_path='')
@@ -406,6 +403,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
