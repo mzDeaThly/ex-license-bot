@@ -20,9 +20,10 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# --- [แก้ไข] ฟังก์ชันสำหรับสร้าง PromptPay Payload เวอร์ชันสมบูรณ์ ---
+
+# --- [แก้ไข] ฟังก์ชันสำหรับสร้าง PromptPay Payload ให้รองรับทุกรูปแบบ ---
 def generate_promptpay_payload(account_id, amount=None):
-    """Generates a standard-compliant PromptPay payload string with a corrected CRC16 checksum."""
+    """Generates a standard-compliant PromptPay payload string for various ID types."""
 
     def crc16_ccitt_false(data: bytes):
         crc = 0xFFFF
@@ -42,12 +43,20 @@ def generate_promptpay_payload(account_id, amount=None):
     payload = "000201"
     payload += "010212" if amount else "010211"
 
-    # Field 29
+    # Field 29: Merchant Account Information
     merchant_guid = "0016A000000677010111"
-    if len(target) == 13: # National ID
+
+    if len(target) == 10 and target.startswith('0'): # Phone Number
+        biller_id_value = '0066' + target[1:]
+        biller_id = f"0113{biller_id_value}"
+    elif len(target) == 13: # National ID / Tax ID
         biller_id = f"0113{target}"
-    else: # Phone Number
-        biller_id = f"0113{'0066' + target[1:]}"
+    elif len(target) == 15: # e-Wallet ID
+        biller_id = f"0215{target}"
+    else:
+        # Return empty string if account_id format is invalid
+        return ""
+
     merchant_info = f"{merchant_guid}{biller_id}"
     payload += f"29{len(merchant_info):02}{merchant_info}"
 
@@ -403,6 +412,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
