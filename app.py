@@ -20,10 +20,10 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# --- [เพิ่ม] ฟังก์ชันสำหรับสร้าง PromptPay Payload ด้วยตนเอง ---
+# --- [แก้ไข] ฟังก์ชันสำหรับสร้าง PromptPay Payload ให้ถูกต้องตามมาตรฐาน ---
 def generate_promptpay_payload(account_id, amount=None):
-    """Generates a PromptPay payload string without external libraries."""
-    
+    """Generates a standard-compliant PromptPay payload string."""
+
     def crc16(data: bytes) -> int:
         crc = 0xFFFF
         for b in data:
@@ -36,34 +36,38 @@ def generate_promptpay_payload(account_id, amount=None):
         return crc
 
     target = account_id.replace('-', '')
-    
-    # Payload ID and Type
-    payload = "000201" # Payload Format Indicator
-    payload += "010212" # Point of Initiation Method (11 for static, 12 for dynamic)
 
-    # Merchant Information
-    if len(target) > 13: # e-Wallet ID
-        merchant_info = f"0216{target}"
-    elif len(target) == 13: # National ID
-        merchant_info = f"0113{target}"
-    else: # Phone Number
-        target = '0066' + target[1:]
-        merchant_info = f"0013{target}"
+    # Field 00: Payload Format Indicator
+    payload = "000201"
+    # Field 01: Point of Initiation Method (11 for static, 12 for dynamic)
+    payload += "010212" if amount else "010211"
 
+    # Field 29: Merchant Account Information (for PromptPay)
+    # Sub-field 00: GUID for PromptPay
+    merchant_guid = "0016A000000677010111"
+    # Sub-field 01: Biller ID (Phone or National ID)
+    if len(target) == 13: # National ID
+         biller_id = f"0113{target}"
+    else: # Phone Number (formatted to 0066...)
+        biller_id = f"0113{'0066' + target[1:]}"
+
+    merchant_info = f"{merchant_guid}{biller_id}"
     payload += f"29{len(merchant_info):02}{merchant_info}"
 
-    # Country, Currency, Amount
-    payload += "5802TH" # Country Code
-    payload += "5303764" # Currency Code
+    # Field 58: Country Code
+    payload += "5802TH"
+    # Field 53: Transaction Currency
+    payload += "5303764"
 
+    # Field 54: Transaction Amount (optional)
     if amount:
         amount_str = f"{amount:.2f}"
         payload += f"54{len(amount_str):02}{amount_str}"
 
-    # Checksum
+    # Field 63: CRC Checksum
     payload_for_crc = payload + "6304"
     checksum = crc16(payload_for_crc.encode('ascii'))
-    
+
     return f"{payload_for_crc}{checksum:04X}"
 
 # --- 1. Basic Setup ---
@@ -348,9 +352,29 @@ def handle_message(event):
                     reply_text = f"ไม่พบ License Key '{key_to_notify}'"
 
             elif command == 'check':
-                active_licenses = License.query.filter(License.status == 'active', License.expires_on >= date.today()).count()
-                pending_licenses = License.query.filter_by(status='pending').count()
-                reply_text = f"📊 สรุปสถานะ:\n- ใช้งานได้: {active_licenses} รายการ\n- รอเปิดใช้งาน: {pending_licenses} รายการ"
+                all_licenses = License.query.order_by(License.id).all()
+            
+                if not all_licenses:
+                    reply_text = "ℹ️ ไม่มีข้อมูล License ในระบบ"
+                else:
+                    details = [f"📋 License ทั้งหมด: {len(all_licenses)} รายการ\n"]
+                    for lic in all_licenses:
+                        exp_date = lic.expires_on.strftime('%Y-%m-%d')
+                        status_text = lic.status.capitalize()
+            
+                        lic_info = (
+                            f"Key: `{lic.key}`\n"
+                            f"สถานะ: **{status_text}**\n"
+                            f"หมดอายุ: {exp_date}\n"
+                            f"Max Sessions: {lic.max_sessions}"
+                        )
+                        details.append(lic_info)
+            
+                    reply_text = "\n\n".join(details)
+            
+                    # ป้องกันข้อความยาวเกินขีดจำกัดของ LINE
+                    if len(reply_text) > 4800:
+                        reply_text = f"พบข้อมูล {len(all_licenses)} รายการ แต่ข้อความยาวเกินไปที่จะแสดงผลทั้งหมด"
 
             else:
                 reply_text = "รูปแบบคำสั่งแอดมินไม่ถูกต้อง"
@@ -382,6 +406,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
