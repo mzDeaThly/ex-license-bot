@@ -114,13 +114,11 @@ class License(db.Model):
     active_sessions = db.Column(db.Text, default='[]')
     status = db.Column(db.String(20), default='pending', nullable=False)
 
-
-def __repr__(self):
-   
-    if self.id:
-        return f'<License id={self.id} key="{self.key}">'
-    else:
-        return '<License (new)>'
+    def __repr__(self):
+        if self.id:
+            return f'<License id={self.id} key="{self.key}">'
+        else:
+            return '<License (new)>'
 
 # --- 3. & 4. Admin Panel ---
 def check_auth(username, password):
@@ -155,7 +153,6 @@ with app.app_context():
     db.create_all()
 
 # --- Helper Function for LINE Message ---
-# --- [เพิ่ม] อ่านค่า Group ID จาก Environment ---
 LINE_GROUP_ID = os.environ.get('LINE_GROUP_ID')
 def send_line_message(message_text):
     if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_GROUP_ID]):
@@ -164,7 +161,6 @@ def send_line_message(message_text):
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # เปลี่ยนจาก multicast ไปหาแอดมิน เป็น push ไปที่ Group ID
             line_bot_api.push_message(
                 PushMessageRequest(to=LINE_GROUP_ID, messages=[TextMessage(text=message_text)])
             )
@@ -195,7 +191,7 @@ def create_charge_with_tier():
             return jsonify({'message': 'ข้อมูลไม่ครบถ้วนหรือไม่ถูกต้อง'}), 400
 
         if License.query.filter_by(key=user_key).first():
-             return jsonify({'message': 'License Key นี้มีอยู่ในระบบแล้ว'}), 409
+                return jsonify({'message': 'License Key นี้มีอยู่ในระบบแล้ว'}), 409
 
         tier_info = TIER_CONFIG[tier]
         amount_thb = tier_info['price_satang'] / 100.0
@@ -289,16 +285,29 @@ def heartbeat():
 def line_webhook():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
+
+    # [เพิ่ม Log] แสดงข้อมูลดิบที่ได้รับจาก LINE
+    print("--- Webhook Received ---")
+    print(f"Request Body: {body}")
+    print("------------------------")
+    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("🚨 Invalid Signature. Check your channel secret on Render.")
         abort(400)
     except Exception as e:
+        print(f"🚨 Error in handler: {e}")
         abort(500)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    # [เพิ่ม Log] แสดง event object ทั้งหมดที่ handler ประมวลผลได้
+    print("--- Handler Processed Event ---")
+    print(f"Event Object: {event}")
+    print("-----------------------------")
+
     # --- ตรวจสอบว่าข้อความมาจากกลุ่มที่ถูกต้องหรือไม่ ---
     source_group_id = ""
     if event.source.type == 'group':
@@ -326,7 +335,6 @@ def handle_message(event):
 
     # ถ้าเป็นแอดมินและใช้คำสั่ง
     elif command in admin_commands:
-        # ... (ส่วนประมวลผลคำสั่ง activate, ban, check, notify เหมือนเดิมทุกประการ) ...
         if command == 'activate' and len(parts) == 2:
             key_to_activate = parts[1]
             license_to_activate = License.query.filter_by(key=key_to_activate, status='pending').first()
@@ -423,14 +431,3 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
-
-
-
-
-
-
-
-
-
-
