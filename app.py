@@ -285,29 +285,16 @@ def heartbeat():
 def line_webhook():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-
-    # [เพิ่ม Log] แสดงข้อมูลดิบที่ได้รับจาก LINE
-    print("--- Webhook Received ---")
-    print(f"Request Body: {body}")
-    print("------------------------")
-    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("🚨 Invalid Signature. Check your channel secret on Render.")
         abort(400)
     except Exception as e:
-        print(f"🚨 Error in handler: {e}")
         abort(500)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    # [เพิ่ม Log] แสดง event object ทั้งหมดที่ handler ประมวลผลได้
-    print("--- Handler Processed Event ---")
-    print(f"Event Object: {event}")
-    print("-----------------------------")
-
     # --- ตรวจสอบว่าข้อความมาจากกลุ่มที่ถูกต้องหรือไม่ ---
     source_group_id = ""
     if event.source.type == 'group':
