@@ -2,7 +2,6 @@ import os
 import json
 import uuid
 from datetime import datetime, date, timedelta
-import promptpay
 import qrcode
 import io
 import base64
@@ -156,18 +155,21 @@ with app.app_context():
     db.create_all()
 
 # --- Helper Function for LINE Message ---
+# --- [เพิ่ม] อ่านค่า Group ID จาก Environment ---
+LINE_GROUP_ID = os.environ.get('LINE_GROUP_ID')
 def send_line_message(message_text):
-    if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_ADMIN_USER_IDS]):
-        print("🚨 [LINE] Missing LINE config")
+    if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_GROUP_ID]):
+        print("🚨 [LINE] Missing LINE config for Group")
         return
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            line_bot_api.multicast(
-                MulticastRequest(to=LINE_ADMIN_USER_IDS, messages=[TextMessage(text=message_text)])
+            # เปลี่ยนจาก multicast ไปหาแอดมิน เป็น push ไปที่ Group ID
+            line_bot_api.push_message(
+                PushMessageRequest(to=LINE_GROUP_ID, messages=[TextMessage(text=message_text)])
             )
     except Exception as e:
-        print(f"🚨 [LINE] Error sending message: {e}")
+        print(f"🚨 [LINE] Error sending group message: {e}")
 
 # --- 5. API Endpoints ---
 TIER_CONFIG = {
@@ -297,8 +299,18 @@ def line_webhook():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    # --- ตรวจสอบว่าข้อความมาจากกลุ่มที่ถูกต้องหรือไม่ ---
+    source_group_id = ""
+    if event.source.type == 'group':
+        source_group_id = event.source.group_id
+
+    # ถ้าไม่ได้มาจากกลุ่มที่กำหนดไว้ ให้ออกจากฟังก์ชันทันที
+    if source_group_id != LINE_GROUP_ID:
+        return 'OK'
+
+    # --- ถ้ามาจากกลุ่มที่ถูกต้อง ให้ประมวลผลคำสั่งต่อ ---
     text = event.message.text.strip()
-    user_id = event.source.user_id
+    user_id = event.source.user_id # ID ของผู้ที่พิมพ์คำสั่ง
     reply_token = event.reply_token
 
     parts = text.split(' ')
@@ -307,83 +319,82 @@ def handle_message(event):
     admin_commands = ['activate', 'ban', 'check', 'notify']
     reply_text = ""
 
-    if command in admin_commands:
-        if user_id not in LINE_ADMIN_USER_IDS:
-            reply_text = "⛔️ คุณไม่ได้รับสิทธิ์ในการใช้คำสั่งนี้"
-        else:
-            if command == 'activate' and len(parts) == 2:
-                key_to_activate = parts[1]
-                license_to_activate = License.query.filter_by(key=key_to_activate, status='pending').first()
-                if license_to_activate:
-                    tier = license_to_activate.tier
-                    tier_info = TIER_CONFIG[tier]
-                    license_to_activate.status = 'active'
-                    license_to_activate.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
-                    license_to_activate.max_sessions = tier_info['max_sessions']
-                    license_to_activate.api_key = CAPSOLVER_API_KEY
-                    db.session.commit()
+    # ตรวจสอบสิทธิ์แอดมินจาก User ID เหมือนเดิม
+    if user_id not in LINE_ADMIN_USER_IDS:
+        # ไม่ต้องตอบกลับถ้าคนพิมพ์ไม่ใช่แอดมิน
+        pass
 
-                    activation_message = f"✅ เปิดใช้งาน License '{key_to_activate}' สำเร็จ!\n- Tier: {tier}"
-                    reply_text = activation_message
-                    send_line_message(activation_message)
-                else:
-                    reply_text = f"ไม่พบ License Key '{key_to_activate}' ที่รอการเปิดใช้งาน"
+    # ถ้าเป็นแอดมินและใช้คำสั่ง
+    elif command in admin_commands:
+        # ... (ส่วนประมวลผลคำสั่ง activate, ban, check, notify เหมือนเดิมทุกประการ) ...
+        if command == 'activate' and len(parts) == 2:
+            key_to_activate = parts[1]
+            license_to_activate = License.query.filter_by(key=key_to_activate, status='pending').first()
+            if license_to_activate:
+                tier = license_to_activate.tier
+                tier_info = TIER_CONFIG[tier]
+                license_to_activate.status = 'active'
+                license_to_activate.expires_on = date.today() + timedelta(days=tier_info['duration_days'])
+                license_to_activate.max_sessions = tier_info['max_sessions']
+                license_to_activate.api_key = CAPSOLVER_API_KEY
+                db.session.commit()
 
-            elif command == 'ban' and len(parts) == 2:
-                key_to_ban = parts[1]
-                license_to_ban = License.query.filter_by(key=key_to_ban).first()
-                if license_to_ban:
-                    license_to_ban.status = 'banned'
-                    license_to_ban.expires_on = date.today() - timedelta(days=1)
-                    db.session.commit()
-                    reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
-                else:
-                    reply_text = f"ไม่พบ License Key '{key_to_ban}'"
-
-            elif command == 'notify' and len(parts) == 2:
-                key_to_notify = parts[1]
-                license_to_notify = License.query.filter_by(key=key_to_notify).first()
-                if license_to_notify:
-                    status_message = (
-                        f"🔔 สถานะ License\n"
-                        f"Key: {license_to_notify.key}\n"
-                        f"Tier: {license_to_notify.tier}\n"
-                        f"Status: {license_to_notify.status.capitalize()}\n"
-                        f"Max Sessions: {license_to_notify.max_sessions}\n"
-                        f"หมดอายุ: {license_to_notify.expires_on.strftime('%Y-%m-%d')}"
-                    )
-                    send_line_message(status_message)
-                    reply_text = f"✅ ส่งข้อมูลของ '{key_to_notify}' ให้แอดมินทุกคนแล้ว"
-                else:
-                    reply_text = f"ไม่พบ License Key '{key_to_notify}'"
-
-            elif command == 'check':
-                all_licenses = License.query.order_by(License.id).all()
-            
-                if not all_licenses:
-                    reply_text = "ℹ️ ไม่มีข้อมูล License ในระบบ"
-                else:
-                    details = [f"📋 License ทั้งหมด: {len(all_licenses)} รายการ\n"]
-                    for lic in all_licenses:
-                        exp_date = lic.expires_on.strftime('%Y-%m-%d')
-                        status_text = lic.status.capitalize()
-            
-                        lic_info = (
-                            f"Key: `{lic.key}`\n"
-                            f"สถานะ: **{status_text}**\n"
-                            f"หมดอายุ: {exp_date}\n"
-                            f"Max Sessions: {lic.max_sessions}"
-                        )
-                        details.append(lic_info)
-            
-                    reply_text = "\n\n".join(details)
-            
-                    # ป้องกันข้อความยาวเกินขีดจำกัดของ LINE
-                    if len(reply_text) > 4800:
-                        reply_text = f"พบข้อมูล {len(all_licenses)} รายการ แต่ข้อความยาวเกินไปที่จะแสดงผลทั้งหมด"
-
+                activation_message = f"✅ เปิดใช้งาน License '{key_to_activate}' สำเร็จ!\n- Tier: {tier}"
+                reply_text = activation_message
+                send_line_message(activation_message)
             else:
-                reply_text = "รูปแบบคำสั่งแอดมินไม่ถูกต้อง"
+                reply_text = f"ไม่พบ License Key '{key_to_activate}' ที่รอการเปิดใช้งาน"
+
+        elif command == 'ban' and len(parts) == 2:
+            key_to_ban = parts[1]
+            license_to_ban = License.query.filter_by(key=key_to_ban).first()
+            if license_to_ban:
+                license_to_ban.status = 'banned'
+                license_to_ban.expires_on = date.today() - timedelta(days=1)
+                db.session.commit()
+                reply_text = f"🚫 แบน License '{key_to_ban}' เรียบร้อยแล้ว"
+            else:
+                reply_text = f"ไม่พบ License Key '{key_to_ban}'"
+
+        elif command == 'notify' and len(parts) == 2:
+            key_to_notify = parts[1]
+            license_to_notify = License.query.filter_by(key=key_to_notify).first()
+            if license_to_notify:
+                status_message = (
+                    f"🔔 สถานะ License\n"
+                    f"Key: {license_to_notify.key}\n"
+                    f"Tier: {license_to_notify.tier}\n"
+                    f"Status: {license_to_notify.status.capitalize()}\n"
+                    f"Max Sessions: {license_to_notify.max_sessions}\n"
+                    f"หมดอายุ: {license_to_notify.expires_on.strftime('%Y-%m-%d')}"
+                )
+                send_line_message(status_message)
+                reply_text = f"✅ ส่งข้อมูลของ '{key_to_notify}' ให้แอดมินทุกคนแล้ว"
+            else:
+                reply_text = f"ไม่พบ License Key '{key_to_notify}'"
+
+        elif command == 'check':
+            all_licenses = License.query.order_by(License.id).all()
+            if not all_licenses:
+                reply_text = "ℹ️ ไม่มีข้อมูล License ในระบบ"
+            else:
+                details = [f"📋 License ทั้งหมด: {len(all_licenses)} รายการ\n"]
+                for lic in all_licenses:
+                    exp_date = lic.expires_on.strftime('%Y-%m-%d')
+                    status_text = lic.status.capitalize()
+                    lic_info = (
+                        f"Key: `{lic.key}`\n"
+                        f"สถานะ: **{status_text}**\n"
+                        f"หมดอายุ: {exp_date}\n"
+                        f"Max Sessions: {lic.max_sessions}"
+                    )
+                    details.append(lic_info)
+                reply_text = "\n\n".join(details)
+                if len(reply_text) > 4800:
+                    reply_text = f"พบข้อมูล {len(all_licenses)} รายการ แต่ข้อความยาวเกินไปที่จะแสดงผลทั้งหมด"
+
+        else:
+            reply_text = "รูปแบบคำสั่งแอดมินไม่ถูกต้อง"
 
 
     if reply_text:
@@ -412,6 +423,7 @@ scheduler.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
 
 
